@@ -6,7 +6,7 @@
 // plugins directory itself, which is why this ships as a source file rather
 // than as a published plugin.
 //
-// The plugin does two things:
+// The plugin does three things:
 //
 //   1. Points `javaHome` at the `javac` wrapper that scip-java generated. zinc
 //      forks `$javaHome/bin/javac` for every Java compilation whenever
@@ -15,6 +15,11 @@
 //   2. Writes the Maven coordinates of every project and of the jars on its
 //      classpath to a `*.dependencies.txt` file in the targetroot, which
 //      scip-java reads to enable cross-repository navigation.
+//   3. Writes the `semanticdbTargetRoot` of every project to a
+//      `*.semanticdb-roots.txt` file, which is where scip-java looks for the
+//      SemanticDB files it converts into shards to index Scala sources.
+//      Emitting them is sbt's own `semanticdbEnabled`, turned on by passing
+//      `-Dsbt.semanticdb=true`, so this plugin only reports the locations.
 //
 // Both paths arrive as the `scip.javaHome` and `scip.targetroot` system
 // properties. Each is optional: without them the plugin is a no-op, which keeps
@@ -41,6 +46,9 @@ object ScipSbtPlugin extends AutoPlugin {
     val scipWriteDependencies = taskKey[Unit](
       "Writes the Maven coordinates of this project and its dependencies for scip-java."
     )
+    val scipWriteSemanticdbRoots = taskKey[Unit](
+      "Writes the directories scalac emits SemanticDB files into for scip-java."
+    )
   }
   import autoImport._
 
@@ -51,7 +59,10 @@ object ScipSbtPlugin extends AutoPlugin {
     // to point it at, and overriding it with `None` would discard a build's own
     // value for no reason.
     scipJavaHome.toList.map(home => javaHome := Some(home)) ++
-      Seq(scipWriteDependencies := writeDependencies.value)
+      Seq(
+        scipWriteDependencies := writeDependencies.value,
+        scipWriteSemanticdbRoots := writeSemanticdbRoots.value,
+      )
 
   /**
    * sbt-crossproject defines one project per platform. Only the JVM one ever runs javac, and a
@@ -89,6 +100,7 @@ object ScipSbtPlugin extends AutoPlugin {
           project + "/Compile/compile",
           project + "/Test/compile",
           project + "/scipWriteDependencies",
+          project + "/scipWriteSemanticdbRoots",
         )
       })
       List(clean, compile) ::: state
@@ -133,19 +145,41 @@ object ScipSbtPlugin extends AutoPlugin {
       }
     }
 
+    write(projectId, base, ".dependencies.txt", lines.toSeq)
+  }
+
+  /**
+   * Reports where scalac writes its SemanticDB output. scip-java converts those files into SCIP
+   * shards, which is how Scala sources end up in the index; `semanticdbEnabled` itself is turned on
+   * with `-Dsbt.semanticdb=true` on the command line.
+   *
+   * The paths are reported rather than guessed because `semanticdbTargetRoot` is configurable and
+   * its default depends on sbt's target layout.
+   */
+  private def writeSemanticdbRoots: Def.Initialize[Task[Unit]] = Def.task {
+    val roots = Seq((Compile / semanticdbTargetRoot).value, (Test / semanticdbTargetRoot).value)
+    write(
+      thisProject.value.id,
+      baseDirectory.value,
+      ".semanticdb-roots.txt",
+      roots.map(_.toString).distinct,
+    )
+  }
+
+  /**
+   * Writes one file per project into the targetroot, because sbt runs these tasks in parallel and
+   * scip-java globs for the suffix. The base directory goes into the name as well: two builds of a
+   * multi-build session can each define a project with the same id.
+   */
+  private def write(projectId: String, base: File, suffix: String, lines: Seq[String]): Unit =
     scipTargetroot.foreach { targetroot =>
-      // One file per project, because sbt runs these tasks in parallel and
-      // scip-java reads every file whose name ends in `dependencies.txt`. The
-      // base directory goes into the name as well: two builds of a multi-build
-      // session can each define a project with the same id.
       val name = sanitize(projectId) + "-" + Integer.toHexString(base.toString.hashCode)
       Files.createDirectories(targetroot)
       Files.write(
-        targetroot.resolve(name + ".dependencies.txt"),
+        targetroot.resolve(name + suffix),
         lines.mkString("", "\n", "\n").getBytes(UTF_8),
       )
     }
-  }
 
   private def sanitize(name: String): String = name.replaceAll("[^a-zA-Z0-9_-]", "_")
 }

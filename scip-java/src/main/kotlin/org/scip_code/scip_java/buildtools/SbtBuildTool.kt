@@ -6,13 +6,17 @@ import java.nio.file.Paths
 import java.util.Properties
 import org.scip_code.scip_java.Embedded
 import org.scip_code.scip_java.commands.IndexCommand
+import org.scip_code.scip_java.semanticdb.SemanticdbToScip
 
 /**
  * Indexes an sbt build by pointing sbt's `javaHome` at scip-java's `javac` wrapper: zinc forks
  * `$javaHome/bin/javac` for every Java compilation whenever that setting is defined, and the
  * wrapper adds `-Xplugin:scip` to the compiler options.
  *
- * The setting, a command that compiles every project and the dependency dump used for
+ * Scala sources are indexed through SemanticDB instead: sbt makes scalac emit it, and
+ * [SemanticdbToScip] converts the result into shards of the same kind.
+ *
+ * The `javaHome` setting, a command that compiles every project and the metadata used for
  * cross-repository navigation all come from an `AutoPlugin` that gets injected into the build with
  * `-Dsbt.global.plugins`, so nothing in the repository is modified. See
  * `scip-java/ScipSbtPlugin.scala`.
@@ -38,8 +42,41 @@ class SbtBuildTool(index: IndexCommand) : BuildTool("sbt", index) {
             return 1
         }
         val result = runBuild()
-        if (result.exitCode == 0) reportMissingScipOutput()
+        if (result.exitCode == 0) {
+            convertSemanticdb()
+            reportMissingScipOutput()
+        }
         return generateScipFromTargetroot(result, targetroot(), index)
+    }
+
+    /**
+     * Turns the SemanticDB files scalac emitted into SCIP shards, which is how Scala sources get
+     * indexed. The directories to read come from `*.semanticdb-roots.txt` files that the injected
+     * sbt plugin writes, one per project.
+     */
+    private fun convertSemanticdb() {
+        val roots =
+            readReportedPaths(".semanticdb-roots.txt").filter { Files.isDirectory(it) }.distinct()
+        if (roots.isEmpty()) return
+        val result = SemanticdbToScip(index.workingDirectory, targetroot()).convert(roots)
+        result.errors.forEach { index.app.error(it) }
+        if (result.shardsWritten > 0) {
+            index.app.info("converted ${result.shardsWritten} SemanticDB file(s) into SCIP shards")
+        }
+    }
+
+    /** Reads the line-separated paths out of every `*<suffix>` file the sbt plugin wrote. */
+    private fun readReportedPaths(suffix: String): List<Path> {
+        val targetroot = targetroot()
+        if (!Files.isDirectory(targetroot)) return emptyList()
+        return Files.list(targetroot).use { stream ->
+            stream
+                .filter { Files.isRegularFile(it) && it.fileName.toString().endsWith(suffix) }
+                .toList()
+                .flatMap { file ->
+                    Files.readAllLines(file).filter { it.isNotBlank() }.map { Paths.get(it.trim()) }
+                }
+        }
     }
 
     fun targetroot(): Path = index.finalTargetroot(defaultTargetroot)
@@ -64,9 +101,9 @@ class SbtBuildTool(index: IndexCommand) : BuildTool("sbt", index) {
         if (containsFileWithSuffix(targetroot(), ".scip")) return
         index.app.warning(
             "sbt finished successfully but produced no SCIP shards in ${targetroot()}. " +
-                "scip-java only indexes Java sources, so this is expected for a build that has none. " +
-                "Otherwise, the most likely cause is that the build defines `javaHome` itself, which " +
-                "overrides the `javac` wrapper that scip-java indexes through."
+                "This is expected for a build with no Java or Scala sources. Otherwise, the most " +
+                "likely cause is that the build defines `javaHome` or `semanticdbEnabled` itself, " +
+                "overriding the settings scip-java indexes through."
         )
     }
 
@@ -113,6 +150,9 @@ class SbtBuildTool(index: IndexCommand) : BuildTool("sbt", index) {
             command += "--batch"
             command += "--no-colors"
             command += "-Dsbt.supershell=false"
+            // Make scalac emit SemanticDB, which `convertSemanticdb` turns into SCIP
+            // shards. sbt has built-in support for this, so no plugin wiring is needed.
+            command += "-Dsbt.semanticdb=true"
             command += "-Dsbt.global.plugins=${Embedded.sbtGlobalPluginsDirectory(tmp)}"
             command += "-Dscip.javaHome=${javac.javaHome}"
             command += "-Dscip.targetroot=${targetroot()}"

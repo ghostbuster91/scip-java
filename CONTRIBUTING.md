@@ -43,6 +43,8 @@ These are the main components of the project.
 - `tests/snapshots`: slow running
   ["snapshot tests"](https://jestjs.io/docs/en/snapshot-testing) that index a
   corpus of published Java libraries.
+- `scip-semanticdb/src/main/java`: converts SemanticDB files (emitted by scalac)
+  into SCIP shards.
 - `scip-java/src/main/kotlin`: implementation of the `scip-java` command-line
   interface.
 - `scip-java/src/test`: build-tool integration tests and fixtures for the

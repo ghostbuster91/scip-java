@@ -29,6 +29,7 @@ include(
     "scip-javac",
     "scip-kotlin-analysis",
     "scip-aggregator",
+    "scip-semanticdb",
     "scip-maven-plugin",
     "scip-gradle-plugin",
     "scip-java",

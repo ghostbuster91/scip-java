@@ -49,6 +49,21 @@ class SbtBuildToolTest : BuildToolHarness() {
                     |"""
                         .trimMargin(),
             ),
+            checkBuild(
+                "scala",
+                fixture = "sbt/scala",
+                // One shard from SemanticDB for the Scala source, one from the
+                // javac plugin for the Java source.
+                expectedScipFiles = 2,
+                requiresCommand = "sbt",
+                expectedPackages =
+                    """
+                    |maven:org.scala-lang:scala-library:2.13.16
+                    |maven:org.scala-lang:scala3-library_3:3.7.4
+                    |maven:org.scip-code:example_3:1.0-SNAPSHOT
+                    |"""
+                        .trimMargin(),
+            ),
             checkErrorOutput(
                 "unsupported-version",
                 listOf("index"),

@@ -1,7 +1,7 @@
 # Getting started
 
 By following the instructions on this page, you should be able to generate a
-[SCIP](https://github.com/scip-code/scip) index of your Java codebase using
+[SCIP](https://github.com/scip-code/scip) index of your Java, Kotlin or Scala codebase using
 Gradle, Maven, sbt, or Bazel. See
 [Supported build tools](#supported-build-tools) for an overview of other build
 tools that we're planning to support in the future.
@@ -192,6 +192,7 @@ org.scip_code.scip_java.ScipJava.INSTANCE.printHelp(Console.out)
 | -------------------- | ------ | ----- | --- | -------------- |
 | Java                 | ✅     | ✅    | ✅  |                |
 | Kotlin               | ✅     | ❌    | ❌  |                |
+| Scala                | ❌     | ❌    | ✅  |                |
 
 ### Java
 
@@ -226,6 +227,19 @@ The Kotlin support in scip-java is less mature compared to the Java support.
 Don't hesitate to report issues at https://github.com/scip-code/scip-java if
 you encounter issues using the Kotlin support.
 
+### Scala
+
+Scala is indexed through [SemanticDB](https://scalameta.org/docs/semanticdb/specification.html),
+the semantic index format the Scala compiler itself can emit: Scala 3 with
+`-Xsemanticdb`, Scala 2 with the `semanticdb-scalac` compiler plugin. `scip-java`
+turns those files into SCIP, so the accuracy comes from the Scala compiler rather
+than from a reimplementation of its type checker.
+
+sbt knows how to enable this (`semanticdbEnabled`), which is why Scala support is
+currently limited to the sbt build tool. Scala and Java sources in the same module
+end up in one index with references resolving across the two languages, because
+both halves emit the same symbol format.
+
 ## Supported build tools
 
 It's possible to use scip-java with any Java build tool. Some build tools can be
@@ -237,14 +251,14 @@ tools may require [manual configuration](manual-configuration.md).
 Please open an issue if your build tool is not listed in the table below. Feel
 free to subscribe to the tracking issues to receive updates on your build tool.
 
-| Build tool | Java | Kotlin | Tracking issue                                                                   |
-| ---------- | ---- | ------ | -------------------------------------------------------------------------------- |
-| Maven      | ✅   | ❌     |                                                                                  |
-| Gradle     | ✅   | ✅     |                                                                                  |
-| sbt        | ✅   | ❌     |                                                                                  |
-| Ant        | ❌   | ❌     | [scip-code/scip-java#305](https://github.com/scip-code/scip-java/issues/305) |
-| Bazel      | ✅   | ❌     |                                                                                  |
-| Buck       | ❌   | ❌     | [scip-code/scip-java#99](https://github.com/scip-code/scip-java/issues/99)   |
+| Build tool | Java | Kotlin | Scala | Tracking issue                                                           |
+| ---------- | ---- | ------ | ----- | ------------------------------------------------------------------------ |
+| Maven      | ✅   | ❌     | ❌    |                                                                          |
+| Gradle     | ✅   | ✅     | ❌    |                                                                          |
+| sbt        | ✅   | ❌     | ✅    |                                                                          |
+| Ant        | ❌   | ❌     | ❌    | [scip-code/scip-java#305](https://github.com/scip-code/scip-java/issues/305) |
+| Bazel      | ✅   | ❌     | ❌    |                                                                          |
+| Buck       | ❌   | ❌     | ❌    | [scip-code/scip-java#99](https://github.com/scip-code/scip-java/issues/99) |
 
 **✅**: automatic indexing is fully supported. Please report a bug if the
 `scip-java index` command does not work on your codebase.
@@ -302,6 +316,9 @@ sbt has no wrapper script convention, so the `sbt` launcher has to be on `PATH`
 Docker image's Gradle and Maven, sbt is not bundled, so install it in your CI
 job before running `scip-java index`.
 
+sbt is the one build tool where **Scala** is indexed as well as Java — see
+[Scala](#scala) for how that works.
+
 Indexing does not modify any file in the repository. `scip-java` generates a
 `javac` wrapper that adds its compiler plugin to every Java compilation, and
 injects a small sbt `AutoPlugin` through `-Dsbt.global.plugins` that:
@@ -312,16 +329,19 @@ injects a small sbt `AutoPlugin` through `-Dsbt.global.plugins` that:
   configurations of every project in the build, including projects that the root
   project does not aggregate,
 - records the Maven coordinates of every project and of the jars on its
-  classpath, so cross-repository navigation works without extra configuration.
+  classpath, so cross-repository navigation works without extra configuration,
+- reports where scalac writes its SemanticDB output, which `scip-java` converts
+  into SCIP shards. Indexing turns this on with `-Dsbt.semanticdb=true`; see
+  [Scala](#scala).
 
 Keep the following limitations in mind:
 
-| Integration                   | Supported | Notes                                                                 |
-| ----------------------------- | --------- | --------------------------------------------------------------------- |
-| sbt 1.x                       | ❌        | Use sbt 2.1 or newer.                                                 |
-| Scala sources                 | ❌        | Only Java sources are indexed, in Scala and mixed projects alike.      |
-| Scala.js / Scala Native       | ❌        | These projects are skipped: only the JVM platform runs `javac`.        |
-| Builds that set `javaHome`    | ❌        | A build-defined `javaHome` overrides the wrapper and nothing is indexed. |
+| Integration                            | Supported | Notes                                                                                     |
+| -------------------------------------- | --------- | ----------------------------------------------------------------------------------------- |
+| sbt 1.x                                | ❌        | Use sbt 2.1 or newer.                                                                     |
+| Scala.js / Scala Native                | ❌        | Those projects are skipped; a cross-project is indexed through its JVM platform only.      |
+| Builds setting `javaHome`              | ❌        | A build-defined `javaHome` overrides the wrapper, so Java sources are not indexed.         |
+| Builds setting `semanticdbEnabled`     | ❌        | Setting it to `false` in the build overrides `-Dsbt.semanticdb`, so Scala is not indexed.  |
 
 Because `-Dsbt.global.plugins` replaces the global plugins directory for the
 duration of indexing, plugins installed in `~/.sbt` are not loaded. Builds that

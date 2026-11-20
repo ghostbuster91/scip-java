@@ -1,4 +1,4 @@
-package org.scip_code.scip_java.aggregator;
+package org.scip_code.scip_java.shared;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 

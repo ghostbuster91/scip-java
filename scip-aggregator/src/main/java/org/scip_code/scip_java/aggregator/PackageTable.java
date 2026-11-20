@@ -12,6 +12,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
+import org.scip_code.scip_java.shared.SymbolDescriptor;
 
 public class PackageTable {
 

@@ -1,7 +1,6 @@
-package org.scip_code.scip_java.aggregator;
+package org.scip_code.scip_java.shared;
 
 import java.util.Optional;
-import org.scip_code.scip_java.shared.ScipSymbols;
 import org.scip_code.scip_java.shared.ScipSymbols.Descriptor;
 import org.scip_code.scip_java.shared.ScipSymbols.Descriptor.Kind;
 
