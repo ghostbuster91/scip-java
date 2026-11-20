@@ -80,32 +80,54 @@ object ScipSbtPlugin extends AutoPlugin {
    * Compiles every project of every build in the session, including the ones the root project does
    * not aggregate. Each phase is a single `all` command so that sbt runs the tasks it contains in
    * parallel.
+   *
+   * Takes an optional Scala version to index a cross-built repository at. Given one, it switches to
+   * that version and leaves out the projects that do not list it in `crossScalaVersions` — the same
+   * projects `++` itself leaves behind. Compiling those too is not an option: they would keep their
+   * old Scala version while their dependencies switched, so their classpath would mix two
+   * incompatible Scala versions and nothing would compile.
    */
-  private def scipCompileAll: Command = Command.command("scipCompileAll") { state =>
-    def isIndexable(project: ResolvedProject): Boolean =
-      project.autoPlugins.contains(plugins.JvmPlugin) &&
-        !project.autoPlugins.exists(plugin => nonJvmPlatformPlugins.contains(plugin.label))
+  private def scipCompileAll: Command =
+    Command.args("scipCompileAll", "[<scala-version>]") { (state, args) =>
+      val requestedScalaVersion = args.headOption.filter(_.nonEmpty)
+      val structure = Project.extract(state).structure
 
-    val projects = Project.extract(state).structure.allProjectPairs.collect {
-      case (project, ref) if isIndexable(project) => "{" + ref.build + "}" + ref.project
+      // Mirrors sbt's own reading of the setting, where an empty
+      // `crossScalaVersions` means the project is built at one version only.
+      def crossVersions(ref: ProjectRef): Seq[String] =
+        (ref / crossScalaVersions).get(structure.data).getOrElse(Nil) match {
+          case Nil      => (ref / scalaVersion).get(structure.data).toSeq
+          case versions => versions
+        }
+
+      def isIndexable(project: ResolvedProject, ref: ProjectRef): Boolean =
+        project.autoPlugins.contains(plugins.JvmPlugin) &&
+          !project.autoPlugins.exists(plugin => nonJvmPlatformPlugins.contains(plugin.label)) &&
+          requestedScalaVersion.forall(crossVersions(ref).contains)
+
+      val projects = structure.allProjectPairs.collect {
+        case (project, ref) if isIndexable(project, ref) => "{" + ref.build + "}" + ref.project
+      }
+      // Switch first, so the projects selected above compile at the requested
+      // version. Issued even when nothing matched, so that sbt reports why.
+      val switch = requestedScalaVersion.map("++" + _).toList
+      if (projects.isEmpty) switch ::: state
+      else {
+        // Clean first, so incremental compilation cannot skip sources that an
+        // earlier build already compiled, and so that cleaning a project cannot
+        // wipe the targetroot from underneath the shards we are about to write.
+        val clean = all(projects.map(_ + "/clean"))
+        val compile = all(projects.flatMap { project =>
+          List(
+            project + "/Compile/compile",
+            project + "/Test/compile",
+            project + "/scipWriteDependencies",
+            project + "/scipWriteSemanticdbRoots",
+          )
+        })
+        switch ::: List(clean, compile) ::: state
+      }
     }
-    if (projects.isEmpty) state
-    else {
-      // Clean first, so incremental compilation cannot skip sources that an
-      // earlier build already compiled, and so that cleaning a project cannot
-      // wipe the targetroot from underneath the shards we are about to write.
-      val clean = all(projects.map(_ + "/clean"))
-      val compile = all(projects.flatMap { project =>
-        List(
-          project + "/Compile/compile",
-          project + "/Test/compile",
-          project + "/scipWriteDependencies",
-          project + "/scipWriteSemanticdbRoots",
-        )
-      })
-      List(clean, compile) ::: state
-    }
-  }
 
   private def all(tasks: Seq[String]): String = ("all" +: tasks).mkString(" ")
 

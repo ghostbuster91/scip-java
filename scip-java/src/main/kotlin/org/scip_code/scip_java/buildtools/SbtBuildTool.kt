@@ -59,7 +59,14 @@ class SbtBuildTool(index: IndexCommand) : BuildTool("sbt", index) {
             readReportedPaths(".semanticdb-roots.txt").filter { Files.isDirectory(it) }.distinct()
         if (roots.isEmpty()) return
         val result = SemanticdbToScip(index.workingDirectory, targetroot()).convert(roots)
-        result.errors.forEach { index.app.error(it) }
+        // Warnings, not errors: each one costs at most one source file's worth of
+        // index, and reporting them as errors would stop the aggregator from
+        // writing an index for everything that did convert.
+        result.warnings.take(MAX_REPORTED_WARNINGS).forEach { index.app.warning(it) }
+        val unreported = result.warnings.size - MAX_REPORTED_WARNINGS
+        if (unreported > 0) {
+            index.app.warning("$unreported more SemanticDB conversion warning(s) not shown")
+        }
         if (result.shardsWritten > 0) {
             index.app.info("converted ${result.shardsWritten} SemanticDB file(s) into SCIP shards")
         }
@@ -170,6 +177,9 @@ class SbtBuildTool(index: IndexCommand) : BuildTool("sbt", index) {
     }
 
     companion object {
+        /** Enough to see the shape of a problem without burying the build log. */
+        private const val MAX_REPORTED_WARNINGS: Int = 10
+
         /**
          * The oldest supported sbt version. sbt 1.x was supported through the `sbt-sourcegraph`
          * plugin, which no longer exists.

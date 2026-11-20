@@ -230,15 +230,37 @@ you encounter issues using the Kotlin support.
 ### Scala
 
 Scala is indexed through [SemanticDB](https://scalameta.org/docs/semanticdb/specification.html),
-the semantic index format the Scala compiler itself can emit: Scala 3 with
-`-Xsemanticdb`, Scala 2 with the `semanticdb-scalac` compiler plugin. `scip-java`
-turns those files into SCIP, so the accuracy comes from the Scala compiler rather
-than from a reimplementation of its type checker.
+the semantic index format the Scala 3 compiler emits with `-Xsemanticdb`.
+`scip-java` turns those files into SCIP, so the accuracy comes from the Scala
+compiler rather than from a reimplementation of its type checker.
 
 sbt knows how to enable this (`semanticdbEnabled`), which is why Scala support is
 currently limited to the sbt build tool. Scala and Java sources in the same module
 end up in one index with references resolving across the two languages, because
 both halves emit the same symbol format.
+
+Scala 2 is not a supported target. Such a build goes down the same path, because
+sbt wires up the `semanticdb-scalac` compiler plugin for it, but nothing about it
+is tested.
+
+#### Cross-built repositories
+
+An index describes one Scala version. To index a cross-built repository at a
+version other than the build's default, pass that version to `scipCompileAll`:
+
+```sh
+scip-java index -- 'scipCompileAll 3.3.9'
+```
+
+The command switches to that version and leaves out the projects that do not
+list it in `crossScalaVersions`, which are exactly the ones sbt's own `++` leaves
+behind. They have to be left out: they would keep the build's default Scala
+version while their dependencies switched, so their classpath would mix two
+incompatible Scala versions and nothing would compile. Index those projects in a
+separate run if you need them.
+
+Do not pass `++<version>` yourself — `scipCompileAll` would then compile every
+project, including the ones `++` skipped.
 
 ## Supported build tools
 

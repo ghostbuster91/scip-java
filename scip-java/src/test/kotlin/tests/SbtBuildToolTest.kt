@@ -64,6 +64,23 @@ class SbtBuildToolTest : BuildToolHarness() {
                     |"""
                         .trimMargin(),
             ),
+            checkBuild(
+                // `scipCompileAll <version>` switches to that version and leaves
+                // out the projects that do not declare it, so only the
+                // cross-built project is indexed here.
+                "cross-version",
+                fixture = "sbt/cross-version",
+                expectedScipFiles = 1,
+                requiresCommand = "sbt",
+                extraArguments = listOf("--", "scipCompileAll 3.3.9"),
+                expectedPackages =
+                    """
+                    |maven:org.scala-lang:scala-library:2.13.18
+                    |maven:org.scala-lang:scala3-library_3:3.3.9
+                    |maven:org.scip-code:both_3:1.0-SNAPSHOT
+                    |"""
+                        .trimMargin(),
+            ),
             checkErrorOutput(
                 "unsupported-version",
                 listOf("index"),

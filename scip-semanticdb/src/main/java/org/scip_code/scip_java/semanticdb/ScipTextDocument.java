@@ -119,6 +119,11 @@ public class ScipTextDocument {
   public static List<Semanticdb.SymbolOccurrence> alternativeSymbols(
       Semanticdb.SymbolInformation info) {
     SymbolOccurrences alternatives = new SymbolOccurrences();
+    // Only a symbol whose owners are all global can have a synthetic global alias,
+    // so there is nothing to derive for anything declared inside a method body.
+    // Such symbols are also not what the parser below accepts: neither `local8`
+    // nor `local15(name)`, the parameter of a local method.
+    if (SemanticdbSymbols.isWithinLocal(info.getSymbol())) return alternatives.occurrences;
     SymbolDescriptor sym = SymbolDescriptor.parseFromSymbol(info.getSymbol());
     switch (sym.descriptor().kind()) {
       case Method:

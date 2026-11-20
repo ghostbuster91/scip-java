@@ -680,13 +680,17 @@ public class SignatureFormatter {
                   (typeArg) -> {
                     // if hardlink (aka wildcard) we need to reach into declarations at index
                     // hardlinkStep
-                    if (typeArg.equals(WILDCARD_TYPE_REF)) {
-                      SymbolInformation hardlink =
-                          type.getExistentialType()
-                              .getDeclarations()
-                              .getHardlinks(hardlinkStep.getAndIncrement());
-                      return symbolDisplayName(hardlink.getSymbol())
-                          + new SignatureFormatter(hardlink, symtab).formatSymbol();
+                    if (isHardlink(typeArg)) {
+                      Scope declarations = type.getExistentialType().getDeclarations();
+                      int step = hardlinkStep.getAndIncrement();
+                      if (step < declarations.getHardlinksCount()) {
+                        SymbolInformation hardlink = declarations.getHardlinks(step);
+                        return symbolDisplayName(hardlink.getSymbol())
+                            + new SignatureFormatter(hardlink, symtab).formatSymbol();
+                      }
+                      // No declaration to describe it: all that is left to say is
+                      // that the argument is a wildcard.
+                      return symbolDisplayName(typeArg.getTypeRef().getSymbol());
                     }
                     // else for symlink we can use the usual path
                     return formatType(typeArg);
@@ -791,9 +795,33 @@ public class SignatureFormatter {
     return symbolJavaDisplayName(symbol);
   }
 
+  /**
+   * Whether a type argument of an existential type stands for one of that type's declarations
+   * rather than naming a type elsewhere. scip-javac spells those {@code local_wildcard};
+   * semanticdb-scalac emits an ordinary local symbol instead.
+   */
+  private static boolean isHardlink(Type typeArg) {
+    return typeArg.equals(WILDCARD_TYPE_REF)
+        || SemanticdbSymbols.isWithinLocal(typeArg.getTypeRef().getSymbol());
+  }
+
+  /**
+   * A local symbol carries no descriptor to take a name from, so use the name from its {@link
+   * SymbolInformation} when the enclosing scope hardlinked it, and otherwise fall back to the
+   * wildcard it stands for.
+   */
+  private String localDisplayName(String symbol, String wildcard) {
+    SymbolInformation info = symtab.symbols.get(symbol);
+    if (info == null || info.getDisplayName().isEmpty()) return wildcard;
+    return info.getDisplayName();
+  }
+
   private String symbolScalaDisplayName(String symbol) {
     if ("local_wildcard".equals(symbol)) {
       return "*";
+    }
+    if (SemanticdbSymbols.isWithinLocal(symbol)) {
+      return localDisplayName(symbol, "_");
     }
     return SymbolDescriptor.parseFromSymbol(symbol).descriptor().name();
   }
@@ -821,6 +849,9 @@ public class SignatureFormatter {
       case "scala/Unit#":
         return "void";
       default:
+        if (SemanticdbSymbols.isWithinLocal(symbol)) {
+          return localDisplayName(symbol, "?");
+        }
         return SymbolDescriptor.parseFromSymbol(symbol).descriptor().name();
     }
   }

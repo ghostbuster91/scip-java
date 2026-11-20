@@ -29,9 +29,9 @@ import org.scip_code.scip_java.shared.ScipShardWriter;
 
 /**
  * Converts the SemanticDB files a compiler emitted into the {@code .scip} shards that {@code
- * scip-java aggregate} consumes. This is how Scala sources get indexed: scalac already knows how to
- * emit SemanticDB (Scala 3 with {@code -Xsemanticdb}, Scala 2 with the {@code semanticdb-scalac}
- * plugin), so scip-java only has to translate the format.
+ * scip-java aggregate} consumes. This is how Scala sources get indexed: the Scala 3 compiler
+ * already emits SemanticDB with {@code -Xsemanticdb}, so scip-java only has to translate the
+ * format.
  *
  * <p>Shards carry bare descriptor symbols, exactly like the ones the javac and kotlinc plugins
  * write — resolving them to fully qualified SCIP symbols is the aggregator's job. That is what lets
@@ -42,9 +42,11 @@ public final class SemanticdbToScip {
 
   /**
    * Outcome of a conversion run. Problems are returned rather than logged so that the caller owns
-   * reporting; a failure to read one file never aborts the rest.
+   * reporting, and they are warnings rather than errors by design: the worst any single one costs
+   * is one source file's worth of index. Failing the whole run — and with it the index for every
+   * other file — would be the less useful outcome.
    */
-  public record Result(int shardsWritten, List<String> errors) {}
+  public record Result(int shardsWritten, List<String> warnings) {}
 
   private static final PathMatcher SEMANTICDB_PATTERN =
       FileSystems.getDefault().getPathMatcher("glob:**.semanticdb");
@@ -57,7 +59,8 @@ public final class SemanticdbToScip {
 
   private final Path sourceroot;
   private final Path targetroot;
-  private final List<String> errors = new ArrayList<>();
+  private final List<String> warnings = new ArrayList<>();
+  private final List<String> unformattableSignatures = new ArrayList<>();
   private int shardsWritten;
 
   public SemanticdbToScip(Path sourceroot, Path targetroot) {
@@ -74,7 +77,17 @@ public final class SemanticdbToScip {
         convertFile(file);
       }
     }
-    return new Result(shardsWritten, List.copyOf(errors));
+    if (!unformattableSignatures.isEmpty()) {
+      // Summarized rather than listed one by one: the count is what tells you
+      // whether this is a curiosity or a systematic gap, and one example is
+      // enough to chase it down.
+      warnings.add(
+          unformattableSignatures.size()
+              + " symbol(s) were indexed without a hover signature, for example '"
+              + unformattableSignatures.get(0)
+              + "'");
+    }
+    return new Result(shardsWritten, List.copyOf(warnings));
   }
 
   private List<Path> findSemanticdbFiles(Path root) {
@@ -92,12 +105,12 @@ public final class SemanticdbToScip {
 
             @Override
             public FileVisitResult visitFileFailed(Path file, IOException exc) {
-              errors.add("failed to read " + file + ": " + exc.getMessage());
+              warnings.add("failed to read " + file + ": " + exc.getMessage());
               return FileVisitResult.CONTINUE;
             }
           });
     } catch (IOException e) {
-      errors.add("failed to walk " + root + ": " + e.getMessage());
+      warnings.add("failed to walk " + root + ": " + e.getMessage());
     }
     return result;
   }
@@ -110,7 +123,7 @@ public final class SemanticdbToScip {
       in.setRecursionLimit(1000);
       documents = Semanticdb.TextDocuments.parseFrom(in);
     } catch (IOException e) {
-      errors.add("invalid SemanticDB file " + file + ": " + e.getMessage());
+      warnings.add("invalid SemanticDB file " + file + ": " + e.getMessage());
       return;
     }
     for (Semanticdb.TextDocument semanticdb : documents.getDocumentsList()) {
@@ -122,8 +135,11 @@ public final class SemanticdbToScip {
       if (semanticdb.getLanguage() == Semanticdb.Language.JAVA) continue;
       try {
         writeShard(new ScipTextDocument(file, semanticdb, sourceroot));
-      } catch (IOException e) {
-        errors.add("failed to write a shard for " + semanticdb.getUri() + ": " + e.getMessage());
+      } catch (IOException | RuntimeException e) {
+        // One source the converter cannot make sense of should cost that source,
+        // not the whole index. Scala emits symbols from a long tail of language
+        // features, so this is the difference between a partial index and none.
+        warnings.add("failed to convert " + semanticdb.getUri() + ": " + e);
       }
     }
   }
@@ -149,7 +165,7 @@ public final class SemanticdbToScip {
     String language = language(doc.semanticdb);
     for (Semanticdb.SymbolInformation info : doc.semanticdb.getSymbolsList()) {
       if (info.getSymbol().isEmpty()) continue;
-      builder.addSymbol(scipSymbol(info, doc, symtab, language));
+      builder.addSymbol(scipSymbolInformation(info, doc, symtab, language));
     }
     return builder.build(
         language, ScipShardPaths.relativePath(sourceroot, absolutePath), doc.semanticdb.getText());
@@ -161,7 +177,8 @@ public final class SemanticdbToScip {
 
   private static Optional<Occurrence> scipOccurrence(Semanticdb.SymbolOccurrence occ) {
     if (occ.getSymbol().isEmpty()) return Optional.empty();
-    Occurrence.Builder out = Occurrence.newBuilder().setSymbol(occ.getSymbol());
+    Occurrence.Builder out =
+        Occurrence.newBuilder().setSymbol(SemanticdbSymbols.toScip(occ.getSymbol()));
     if (isDefinitionRole(occ.getRole())) out.setSymbolRoles(SymbolRole.Definition_VALUE);
     setRange(scipRange(occ.getRange()), out::setSingleLineRange, out::setMultiLineRange);
     if (occ.hasEnclosingRange()) {
@@ -173,15 +190,15 @@ public final class SemanticdbToScip {
     return Optional.of(out.build());
   }
 
-  private SymbolInformation scipSymbol(
+  private SymbolInformation scipSymbolInformation(
       Semanticdb.SymbolInformation info, ScipTextDocument doc, Symtab symtab, String language) {
     SymbolInformation.Builder out =
         SymbolInformation.newBuilder()
-            .setSymbol(info.getSymbol())
+            .setSymbol(SemanticdbSymbols.toScip(info.getSymbol()))
             .setDisplayName(info.getDisplayName())
             .setKind(scipKind(info));
     if (!info.getEnclosingSymbol().isEmpty()) {
-      out.setEnclosingSymbol(info.getEnclosingSymbol());
+      out.setEnclosingSymbol(SemanticdbSymbols.toScip(info.getEnclosingSymbol()));
     }
 
     // `semanticdb-scalac` emits SymbolInformation for synthetic symbols that have no
@@ -192,7 +209,7 @@ public final class SemanticdbToScip {
       Semanticdb.SymbolInformation definition = symtab.symbols.get(definitionSymbol);
       out.addRelationships(
           Relationship.newBuilder()
-              .setSymbol(definitionSymbol)
+              .setSymbol(SemanticdbSymbols.toScip(definitionSymbol))
               .setIsDefinition(true)
               .setIsReference(
                   definition != null
@@ -208,16 +225,24 @@ public final class SemanticdbToScip {
       }
       out.addRelationships(
           Relationship.newBuilder()
-              .setSymbol(overriddenSymbol)
+              .setSymbol(SemanticdbSymbols.toScip(overriddenSymbol))
               .setIsImplementation(true)
               .setIsReference(supportsReferenceRelationship(info)));
     }
 
     if (info.hasSignature()) {
-      out.setSignatureDocumentation(
-          Signature.newBuilder()
-              .setLanguage(language)
-              .setText(new SignatureFormatter(info, symtab).formatSymbol()));
+      // Isolated: a formatting failure costs this one symbol its hover text and
+      // nothing else. Scala reaches the formatter with a long tail of language
+      // features, and a missing signature string is not worth dropping a source
+      // file over, let alone the index.
+      try {
+        out.setSignatureDocumentation(
+            Signature.newBuilder()
+                .setLanguage(language)
+                .setText(new SignatureFormatter(info, symtab).formatSymbol()));
+      } catch (RuntimeException e) {
+        unformattableSignatures.add(info.getSymbol());
+      }
     }
     String documentation = info.getDocumentation().getMessage();
     if (!documentation.isEmpty()) out.addDocumentation(documentation);
@@ -243,7 +268,10 @@ public final class SemanticdbToScip {
       if (!symbol.endsWith(".apply().") && !other.getDisplayName().equals(info.getDisplayName())) {
         continue;
       }
-      out.addRelationships(Relationship.newBuilder().setSymbol(symbol).setIsReference(true));
+      out.addRelationships(
+          Relationship.newBuilder()
+              .setSymbol(SemanticdbSymbols.toScip(symbol))
+              .setIsReference(true));
     }
   }
 
