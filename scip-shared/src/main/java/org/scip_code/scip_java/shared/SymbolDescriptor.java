@@ -12,6 +12,12 @@ public record SymbolDescriptor(ScipSymbols.Descriptor descriptor, String owner) 
     return new Parser(symbol).entryPoint();
   }
 
+  /**
+   * Returns the outermost non-package descriptor of {@code symbol}, or empty when there is none to
+   * find. A symbol that does not parse yields empty rather than throwing: this is reached for every
+   * symbol in an index, so one malformed symbol out of a compiler plugin should cost that symbol
+   * its package rather than the whole index.
+   */
   public static Optional<SymbolDescriptor> toplevel(String symbol) {
     if (symbol == null || symbol.isEmpty()) {
       return Optional.empty();
@@ -19,15 +25,30 @@ public record SymbolDescriptor(ScipSymbols.Descriptor descriptor, String owner) 
     if (ScipSymbols.isLocal(symbol)) {
       return Optional.empty();
     }
-    SymbolDescriptor current = parseFromSymbol(symbol);
+    Optional<SymbolDescriptor> parsed = parseOrEmpty(symbol);
+    if (parsed.isEmpty()) {
+      return Optional.empty();
+    }
+    SymbolDescriptor current = parsed.get();
     if (current.descriptor().kind() == Kind.Package) {
       return Optional.empty();
     }
-    SymbolDescriptor owner = parseFromSymbol(current.owner());
-    if (owner.descriptor().kind() == Kind.Package) {
+    Optional<SymbolDescriptor> owner = parseOrEmpty(current.owner());
+    if (owner.isEmpty()) {
+      return Optional.empty();
+    }
+    if (owner.get().descriptor().kind() == Kind.Package) {
       return Optional.of(current);
     } else {
       return toplevel(current.owner());
+    }
+  }
+
+  private static Optional<SymbolDescriptor> parseOrEmpty(String symbol) {
+    try {
+      return Optional.of(parseFromSymbol(symbol));
+    } catch (IllegalArgumentException e) {
+      return Optional.empty();
     }
   }
 

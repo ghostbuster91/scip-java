@@ -62,6 +62,14 @@ object ScipSbtPlugin extends AutoPlugin {
       Seq(
         scipWriteDependencies := writeDependencies.value,
         scipWriteSemanticdbRoots := writeSemanticdbRoots.value,
+        // `scipCompileAll` names every project it wants, so aggregation can only
+        // pull back in the projects it deliberately left out: the Scala.js and
+        // Scala Native rows, and the rows built at another Scala version. Asking
+        // an aggregating project for `compile` would otherwise reach all of them.
+        clean / aggregate := false,
+        compile / aggregate := false,
+        scipWriteDependencies / aggregate := false,
+        scipWriteSemanticdbRoots / aggregate := false,
       )
 
   /**

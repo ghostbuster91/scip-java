@@ -13,9 +13,11 @@ import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.Set;
 import org.scip_code.scip.Document;
 import org.scip_code.scip.Occurrence;
 import org.scip_code.scip.Relationship;
@@ -26,6 +28,7 @@ import org.scip_code.scip_java.shared.ScipDocumentBuilder;
 import org.scip_code.scip_java.shared.ScipRange;
 import org.scip_code.scip_java.shared.ScipShardPaths;
 import org.scip_code.scip_java.shared.ScipShardWriter;
+import org.scip_code.scip_java.shared.SymbolDescriptor;
 
 /**
  * Converts the SemanticDB files a compiler emitted into the {@code .scip} shards that {@code
@@ -61,6 +64,7 @@ public final class SemanticdbToScip {
   private final Path targetroot;
   private final List<String> warnings = new ArrayList<>();
   private final List<String> unformattableSignatures = new ArrayList<>();
+  private final Set<String> unparseableSymbols = new LinkedHashSet<>();
   private int shardsWritten;
 
   public SemanticdbToScip(Path sourceroot, Path targetroot) {
@@ -76,6 +80,13 @@ public final class SemanticdbToScip {
       for (Path file : files) {
         convertFile(file);
       }
+    }
+    if (!unparseableSymbols.isEmpty()) {
+      warnings.add(
+          unparseableSymbols.size()
+              + " SemanticDB symbol(s) were not valid SCIP symbols and were left out, for example '"
+              + unparseableSymbols.iterator().next()
+              + "'");
     }
     if (!unformattableSignatures.isEmpty()) {
       // Summarized rather than listed one by one: the count is what tells you
@@ -164,7 +175,7 @@ public final class SemanticdbToScip {
     Symtab symtab = new Symtab(doc.semanticdb);
     String language = language(doc.semanticdb);
     for (Semanticdb.SymbolInformation info : doc.semanticdb.getSymbolsList()) {
-      if (info.getSymbol().isEmpty()) continue;
+      if (!isEmittable(info.getSymbol())) continue;
       builder.addSymbol(scipSymbolInformation(info, doc, symtab, language));
     }
     return builder.build(
@@ -175,8 +186,26 @@ public final class SemanticdbToScip {
     return semanticdb.getLanguage().toString().toLowerCase(Locale.ROOT);
   }
 
-  private static Optional<Occurrence> scipOccurrence(Semanticdb.SymbolOccurrence occ) {
-    if (occ.getSymbol().isEmpty()) return Optional.empty();
+  /**
+   * Whether {@code symbol} can be emitted as a SCIP symbol. Not everything in a SemanticDB document
+   * is one: Scala 3 writes {@code <?>} where it could not determine a symbol. Emitting those would
+   * hand the aggregator something it cannot resolve to a package, so anything that is neither a
+   * local nor a parseable global symbol is dropped.
+   */
+  private boolean isEmittable(String symbol) {
+    if (symbol.isEmpty()) return false;
+    if (SemanticdbSymbols.isWithinLocal(symbol)) return true;
+    try {
+      SymbolDescriptor.parseFromSymbol(symbol);
+      return true;
+    } catch (RuntimeException e) {
+      unparseableSymbols.add(symbol);
+      return false;
+    }
+  }
+
+  private Optional<Occurrence> scipOccurrence(Semanticdb.SymbolOccurrence occ) {
+    if (!isEmittable(occ.getSymbol())) return Optional.empty();
     Occurrence.Builder out =
         Occurrence.newBuilder().setSymbol(SemanticdbSymbols.toScip(occ.getSymbol()));
     if (isDefinitionRole(occ.getRole())) out.setSymbolRoles(SymbolRole.Definition_VALUE);
@@ -197,7 +226,7 @@ public final class SemanticdbToScip {
             .setSymbol(SemanticdbSymbols.toScip(info.getSymbol()))
             .setDisplayName(info.getDisplayName())
             .setKind(scipKind(info));
-    if (!info.getEnclosingSymbol().isEmpty()) {
+    if (isEmittable(info.getEnclosingSymbol())) {
       out.setEnclosingSymbol(SemanticdbSymbols.toScip(info.getEnclosingSymbol()));
     }
 
@@ -205,7 +234,7 @@ public final class SemanticdbToScip {
     // definition occurrence of their own (a case class `copy`, a companion `apply`).
     // ScipTextDocument points those at the definition they stand in for.
     for (String definitionSymbol : info.getDefinitionRelationshipsList()) {
-      if (definitionSymbol.isEmpty()) continue;
+      if (!isEmittable(definitionSymbol)) continue;
       Semanticdb.SymbolInformation definition = symtab.symbols.get(definitionSymbol);
       out.addRelationships(
           Relationship.newBuilder()
@@ -220,7 +249,7 @@ public final class SemanticdbToScip {
     addCliqueReferences(out, info, symtab, doc.definitionCliques.get(info.getSymbol()));
 
     for (String overriddenSymbol : info.getOverriddenSymbolsList()) {
-      if (overriddenSymbol.isEmpty() || overriddenSymbol.equals(IGNORED_OVERRIDDEN_SYMBOL)) {
+      if (!isEmittable(overriddenSymbol) || overriddenSymbol.equals(IGNORED_OVERRIDDEN_SYMBOL)) {
         continue;
       }
       out.addRelationships(
