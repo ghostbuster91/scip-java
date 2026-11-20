@@ -13,7 +13,7 @@ class MissingBuildToolTest : BuildToolHarness() {
                 listOf("index"),
                 expectedOutput =
                     "error: No build tool detected in workspace '/workingDirectory'. " +
-                        "At the moment, the only supported build tools are: Maven, Gradle.",
+                        "At the moment, the only supported build tools are: Maven, Gradle, sbt.",
             ),
             checkErrorOutput(
                 "ambiguous",

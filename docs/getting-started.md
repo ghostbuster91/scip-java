@@ -2,7 +2,7 @@
 
 By following the instructions on this page, you should be able to generate a
 [SCIP](https://github.com/scip-code/scip) index of your Java codebase using
-Gradle, Maven, or Bazel. See
+Gradle, Maven, sbt, or Bazel. See
 [Supported build tools](#supported-build-tools) for an overview of other build
 tools that we're planning to support in the future.
 
@@ -125,7 +125,7 @@ If you're using Maven.
 
 ## Run `scip-java index`
 
-> The `index` command is only supported for Gradle and Maven. See
+> The `index` command is only supported for Gradle, Maven and sbt. See
 > [Supported build tools](#supported-build-tools) for more details about other
 > build tools.
 
@@ -136,7 +136,7 @@ This command should automatically infer the structure of your codebase and
 configure your build tool to generate SCIP.
 
 ```sh
-# At the root of a Gradle or Maven codebase.
+# At the root of a Gradle, Maven or sbt codebase.
 $ scip-java index
 ...
 info: /path/to/index.scip
@@ -146,6 +146,7 @@ info: /path/to/index.scip
 | ---------- | ---------------------------------------------------------- |
 | Gradle     | `clean compileTestJava compileTestKotlin compileTestKotlinJvm` |
 | Maven      | `--batch-mode clean verify -DskipTests`                    |
+| sbt        | `scipCompileAll`                                           |
 
 Customize the build command by passing additional arguments after
 `scip-java index --`.
@@ -165,7 +166,8 @@ from your build.
 
 For Gradle builds, this requires enabling `maven-publish` and defining a Maven
 publication (for example, from `components["java"]`) in `build.gradle` or
-`build.gradle.kts`.
+`build.gradle.kts`. Maven and sbt builds already declare the coordinates
+`scip-java` needs, so they require no extra configuration.
 
 If this is not configured, indexing may still succeed, but cross-repository
 definitions/references may not resolve.
@@ -186,10 +188,10 @@ org.scip_code.scip_java.ScipJava.INSTANCE.printHelp(Console.out)
 
 ## Supported programming languages
 
-| Programming language | Gradle | Maven | Tracking issue |
-| -------------------- | ------ | ----- | -------------- |
-| Java                 | ✅     | ✅    |                |
-| Kotlin               | ✅     | ❌    |                |
+| Programming language | Gradle | Maven | sbt | Tracking issue |
+| -------------------- | ------ | ----- | --- | -------------- |
+| Java                 | ✅     | ✅    | ✅  |                |
+| Kotlin               | ✅     | ❌    | ❌  |                |
 
 ### Java
 
@@ -239,6 +241,7 @@ free to subscribe to the tracking issues to receive updates on your build tool.
 | ---------- | ---- | ------ | -------------------------------------------------------------------------------- |
 | Maven      | ✅   | ❌     |                                                                                  |
 | Gradle     | ✅   | ✅     |                                                                                  |
+| sbt        | ✅   | ❌     |                                                                                  |
 | Ant        | ❌   | ❌     | [scip-code/scip-java#305](https://github.com/scip-code/scip-java/issues/305) |
 | Bazel      | ✅   | ❌     |                                                                                  |
 | Buck       | ❌   | ❌     | [scip-code/scip-java#99](https://github.com/scip-code/scip-java/issues/99)   |
@@ -284,6 +287,45 @@ The following Maven integrations are not yet supported:
 | Integration         | Supported | Tracking issue                                                                   |
 | ------------------- | --------- | -------------------------------------------------------------------------------- |
 | kotlin-maven-plugin | ❌        | [scip-code/scip-java#304](https://github.com/scip-code/scip-java/issues/304) |
+
+### sbt
+
+The `scip-java index` command supports **sbt 2.1 and newer**. Your build must
+declare that version in `project/build.properties`:
+
+```
+sbt.version=2.1.0
+```
+
+sbt has no wrapper script convention, so the `sbt` launcher has to be on `PATH`
+(a `./sbt` script in the repository root is used when there is one). Unlike the
+Docker image's Gradle and Maven, sbt is not bundled, so install it in your CI
+job before running `scip-java index`.
+
+Indexing does not modify any file in the repository. `scip-java` generates a
+`javac` wrapper that adds its compiler plugin to every Java compilation, and
+injects a small sbt `AutoPlugin` through `-Dsbt.global.plugins` that:
+
+- points `javaHome` at that wrapper, which makes zinc fork it for Java
+  compilation,
+- adds the `scipCompileAll` command, which compiles the `Compile` and `Test`
+  configurations of every project in the build, including projects that the root
+  project does not aggregate,
+- records the Maven coordinates of every project and of the jars on its
+  classpath, so cross-repository navigation works without extra configuration.
+
+Keep the following limitations in mind:
+
+| Integration                   | Supported | Notes                                                                 |
+| ----------------------------- | --------- | --------------------------------------------------------------------- |
+| sbt 1.x                       | ❌        | Use sbt 2.1 or newer.                                                 |
+| Scala sources                 | ❌        | Only Java sources are indexed, in Scala and mixed projects alike.      |
+| Scala.js / Scala Native       | ❌        | These projects are skipped: only the JVM platform runs `javac`.        |
+| Builds that set `javaHome`    | ❌        | A build-defined `javaHome` overrides the wrapper and nothing is indexed. |
+
+Because `-Dsbt.global.plugins` replaces the global plugins directory for the
+duration of indexing, plugins installed in `~/.sbt` are not loaded. Builds that
+depend on a global plugin need it declared in `project/plugins.sbt` instead.
 
 ### Bazel
 

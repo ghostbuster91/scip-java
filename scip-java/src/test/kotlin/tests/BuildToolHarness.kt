@@ -1,6 +1,7 @@
 package tests
 
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.io.PrintStream
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
@@ -112,6 +113,7 @@ abstract class BuildToolHarness {
         prepare: (Path) -> Unit = {},
         targetRoot: String? = null,
         maxJdk: Int? = null,
+        requiresCommand: String? = null,
         substitutions: Map<String, String> = emptyMap(),
         runs: Int = 1,
     ): DynamicTest =
@@ -121,6 +123,12 @@ abstract class BuildToolHarness {
             assumeTrue(
                 maxJdk == null || currentJavaVersion <= maxJdk,
                 "Test $name ignored: JDK $currentJavaVersion exceeds max $maxJdk",
+            )
+            // Not every build tool is installed everywhere, and some of them
+            // have no wrapper script to fall back on.
+            assumeTrue(
+                requiresCommand == null || isOnPath(requiresCommand),
+                "Test $name ignored: '$requiresCommand' is not on PATH",
             )
 
             val base = newTempBase()
@@ -204,6 +212,13 @@ abstract class BuildToolHarness {
     companion object {
         /** Major version of the JVM running these tests (e.g. 17, 21). */
         private val currentJavaVersion: Int = Runtime.version().feature()
+
+        /** Whether [command] resolves to an executable file on `PATH`. */
+        internal fun isOnPath(command: String): Boolean =
+            (System.getenv("PATH") ?: "")
+                .split(File.pathSeparator)
+                .filter { it.isNotEmpty() }
+                .any { directory -> Files.isExecutable(Paths.get(directory).resolve(command)) }
 
         /** Run an external command, inheriting stdio. Throws if it exits non-zero. */
         internal fun exec(command: List<String>, cwd: Path) {

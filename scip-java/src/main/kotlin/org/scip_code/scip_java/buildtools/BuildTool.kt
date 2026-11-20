@@ -5,7 +5,7 @@ import java.nio.file.Path
 import org.scip_code.scip_java.commands.AggregateRunner
 import org.scip_code.scip_java.commands.IndexCommand
 
-/** A build tool such as Gradle, Maven or Bazel. */
+/** A build tool such as Gradle, Maven, sbt or Bazel. */
 abstract class BuildTool(val name: String, protected val index: IndexCommand) {
     open val isHidden: Boolean = false
 
@@ -26,7 +26,12 @@ abstract class BuildTool(val name: String, protected val index: IndexCommand) {
             // The order in this list is important - first detected build
             // tool will be used in `auto` mode. Bazel is missing because
             // it isn't supported by auto-indexing.
-            listOf(ScipBuildTool(index), MavenBuildTool(index), GradleBuildTool(index))
+            listOf(
+                ScipBuildTool(index),
+                MavenBuildTool(index),
+                GradleBuildTool(index),
+                SbtBuildTool(index),
+            )
 
         fun allNames(): String =
             all(IndexCommand()).filterNot { it.isHidden }.joinToString(", ") { it.name }

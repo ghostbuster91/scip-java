@@ -26,6 +26,9 @@ If you'd rather install tools manually, you'll need at least:
   [general installation guide](https://gradle.org/install/).
 - `mvn`: `brew install maven`, or see
   [general installation guide](https://www.baeldung.com/install-maven-on-windows-linux-mac).
+- `sbt` (optional): only needed for the sbt integration tests, which skip
+  themselves when `sbt` is not on `PATH`. `brew install sbt`, or see
+  [general installation guide](https://www.scala-sbt.org/download).
 
 ## Project structure
 
@@ -53,12 +56,12 @@ These are the main components of the project.
 | Command                                                 | Where    | Description                                                             |
 | ------------------------------------------------------- | -------- | ----------------------------------------------------------------------- |
 | `gradle test --no-daemon`                               | terminal | Run all Gradle tests.                                                    |
-| `gradle :scip-java:test --no-daemon`                    | terminal | Run CLI build-tool integration tests (Gradle, Maven, SCIP config).       |
+| `gradle :scip-java:test --no-daemon`                    | terminal | Run CLI build-tool integration tests (Gradle, Maven, sbt, SCIP config). |
 | `gradle :scip-kotlin-analysis:test --no-daemon`                 | terminal | Run Kotlin indexer tests.                                        |
 | `gradle :scip-snapshots:test --no-daemon`               | terminal | Compare Java and Kotlin snapshot goldens.                                |
 | `gradle :scip-snapshots:saveSnapshots --no-daemon`      | terminal | Regenerate Java and Kotlin snapshot goldens.                             |
 | `gradle :scip-java:installDist --no-daemon`             | terminal | Build a local `scip-java` distribution under `scip-java/build/install/`. |
-| `gradle :scip-java:run --args='--cwd DIRECTORY'`        | terminal | Run `scip-java` against a given Gradle/Maven build.                      |
+| `gradle :scip-java:run --args='--cwd DIRECTORY'`        | terminal | Run `scip-java` against a given Gradle/Maven/sbt build.                  |
 | `gradle spotlessApply`                                  | terminal | Format Java and Kotlin sources with Spotless.                            |
 | `gradle spotlessCheck`                                  | terminal | Check Java and Kotlin formatting. Enforced by GitHub Actions.            |
 

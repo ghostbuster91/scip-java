@@ -19,7 +19,7 @@ import org.scip_code.scip_java.buildtools.ScipBuildTool
 
 /**
  * `scip-java index`: detects a build tool in the current working directory and shells out to it
- * (Maven/Gradle/Bazel/scip-java.json) to produce a SCIP index in `index.scip`.
+ * (Maven/Gradle/sbt/Bazel/scip-java.json) to produce a SCIP index in `index.scip`.
  */
 class IndexCommand : CliktCommand(name = "index") {
 

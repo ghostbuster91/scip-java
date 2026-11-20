@@ -25,17 +25,50 @@ object Embedded {
 
     fun gradlePluginJar(tmpDir: Path): Path = copyFile(tmpDir, "gradle-plugin.jar")
 
+    /**
+     * Materializes the sbt `AutoPlugin` that scip-java injects into a build with
+     * `-Dsbt.global.plugins` and returns the directory to pass to that property. sbt compiles the
+     * sources of a global plugins directory itself, so the plugin ships as a source file instead of
+     * a jar.
+     */
+    fun sbtGlobalPluginsDirectory(tmpDir: Path): Path {
+        val out = tmpDir.resolve("sbt-plugins")
+        copyResource(out.resolve("ScipSbtPlugin.scala"), "scip-java/ScipSbtPlugin.scala")
+        return out
+    }
+
     private fun javacErrorpath(tmp: Path): Path = tmp.resolve("errorpath.txt")
 
-    data class CustomJavac(val executable: Path, val environment: Map<String, String>)
+    /**
+     * A `javac` wrapper that injects `-Xplugin:scip` into the compiler options it is invoked with.
+     * Build tools either run [executable] directly or, when they only accept a whole JDK (sbt), run
+     * `bin/javac` out of [javaHome].
+     */
+    data class CustomJavac(
+        val executable: Path,
+        val javaHome: Path,
+        val environment: Map<String, String>,
+    )
 
-    fun customJavac(sourceroot: Path, targetroot: Path, tmp: Path): CustomJavac {
+    /**
+     * @param javacopts where the wrapper dumps the original compiler options. Defaults to
+     *   `javacopts.txt` in the targetroot, which scip-java then reads to resolve the Maven
+     *   coordinates of the dependency jars. Build tools that report their dependencies through
+     *   `dependencies.txt` instead pass a path outside of the targetroot, because
+     *   [org.scip_code.scip_java.buildtools.ClasspathEntry] prefers `javacopts.txt` when it finds
+     *   both.
+     */
+    fun customJavac(
+        sourceroot: Path,
+        targetroot: Path,
+        tmp: Path,
+        javacopts: Path = targetroot.resolve("javacopts.txt"),
+    ): CustomJavac {
         val bin = tmp.resolve("bin")
         val javac = bin.resolve("javac")
         val java = bin.resolve("java")
         val pluginpath = scipJar(tmp)
         val errorpath = javacErrorpath(tmp)
-        val javacopts = targetroot.resolve("javacopts.txt")
         Files.createDirectories(targetroot)
         Files.createDirectories(bin)
         copyResource(java, "scip-java/java-forwarder.sh")
@@ -44,6 +77,7 @@ object Embedded {
         java.toFile().setExecutable(true)
         return CustomJavac(
             javac,
+            tmp,
             mapOf(
                 "SCIP_ERRORPATH" to errorpath.toString(),
                 "SCIP_JAVAC_LAUNCHER_JVM_OPTIONS" to javacLauncherJvmOptions.joinToString("\n"),
