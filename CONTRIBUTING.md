@@ -64,6 +64,20 @@ These are the main components of the project.
 | `gradle :scip-java:run --args='--cwd DIRECTORY'`        | terminal | Run `scip-java` against a given Gradle/Maven/sbt build.                  |
 | `gradle spotlessApply`                                  | terminal | Format Java and Kotlin sources with Spotless.                            |
 | `gradle spotlessCheck`                                  | terminal | Check Java and Kotlin formatting. Enforced by GitHub Actions.            |
+| `nix build .#scip-java`                                 | terminal | Build the CLI as a Nix package, wrapped with its own JDK.                |
+
+The Nix package pins the dependencies Gradle downloads in `nix/deps.json`,
+because the build sandbox has no network. After changing
+`gradle/libs.versions.toml` or a build script, regenerate it from the
+repository root:
+
+```sh
+$(nix build --no-link --print-out-paths .#scip-java.updateScript)
+```
+
+It resolves every configuration of every project with a recording proxy, so it
+takes a while and needs network access. `nix build .#scip-java` fails with a
+missing-file error from the proxy when the lockfile is out of date.
 
 Spotless needs JDK 21 or newer for google-java-format; from the default JDK 17
 shell, run it as `nix develop .#jdk25 --command gradle spotlessApply`.

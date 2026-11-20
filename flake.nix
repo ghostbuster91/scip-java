@@ -62,6 +62,17 @@
           '';
         };
 
+        packages = {
+          default = self.packages.${system}.scip-java;
+          # The `scip-java` CLI, built from this checkout. The JDK it is
+          # wrapped with is also the one it indexes codebases on, so it
+          # matches the JDK of the Docker image rather than the devShell's.
+          scip-java = pkgs.callPackage ./nix/scip-java.nix {
+            jdk = pkgs.jdk25;
+            gradle = pkgs.gradle_9.override ({ java = pkgs.jdk25; });
+          };
+        };
+
         devShells = {
           default = mkDevShell pkgs.jdk17;
           jdk17 = mkDevShell pkgs.jdk17;
