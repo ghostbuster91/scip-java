@@ -23,9 +23,10 @@ import tastyquery.Symbols.*
   * ClassData` mapping, so the index is built here from the same `Classpath` instances that
   * were handed to `Context.initialize`.
   */
-final class JavaMethodOrder(classpath: Classpath):
+final class JavaMethodOrder(classpath: Classpath) {
 
-  private val byBinaryName = mutable.HashMap.empty[String, Option[Vector[JavaMethodOrderMethod]]]
+  private val byBinaryName =
+    mutable.HashMap.empty[String, Option[Vector[JavaMethodOrderMethod]]]
 
   /** Same-named methods of `cls`, in the order dotty numbers them.
     *
@@ -36,11 +37,11 @@ final class JavaMethodOrder(classpath: Classpath):
     Context
   ): Option[Vector[JavaMethodOrderMethod]] =
     methods(cls).map { all =>
-      val matching = all.filter(_.name == name)
+      val matching: Vector[JavaMethodOrderMethod] = all.filter(_.name == name)
       // dotty's `JavaModule` case concatenates the statics holder's declarations with the
       // companion class's, so a static is numbered ahead of an instance method of the same
       // name. Within each group the classfile order is preserved.
-      if staticsFirst then matching.filter(_.isStatic) ++ matching.filterNot(_.isStatic)
+      if (staticsFirst) matching.filter(_.isStatic) ++ matching.filterNot(_.isStatic)
       else matching
     }
 
@@ -48,24 +49,27 @@ final class JavaMethodOrder(classpath: Classpath):
     binaryName(cls).flatMap(n => byBinaryName.getOrElseUpdate(n, read(n)))
 
   /** `java.lang.Math` for the symbol of `java.lang.Math`, dropping any module-class `$`. */
-  private def binaryName(cls: ClassSymbol)(using Context): Option[String] =
+  private def binaryName(cls: ClassSymbol)(using Context): Option[String] = {
     def ownerChain(sym: Symbol, acc: List[String]): Option[List[String]] =
-      sym match
-        case null                           => Some(acc)
+      sym match {
+        case null                                    => Some(acc)
         case pkg: PackageSymbol if pkg.owner == null => Some(acc)
-        case pkg: PackageSymbol             => ownerChain(pkg.owner, pkg.name.toString :: acc)
-        case c: ClassSymbol                 => ownerChain(c.owner, simpleName(c) :: acc)
-        case _                              => None
+        case pkg: PackageSymbol => ownerChain(pkg.owner, pkg.name.toString :: acc)
+        case c: ClassSymbol     => ownerChain(c.owner, simpleName(c) :: acc)
+        case _                  => None
+      }
     ownerChain(cls.owner, Nil).map(prefix => (prefix :+ simpleName(cls)).mkString("."))
+  }
 
-  private def simpleName(cls: ClassSymbol): String =
-    val n = cls.name.toString
-    if n.endsWith("$") then n.dropRight(1) else n
+  private def simpleName(cls: ClassSymbol): String = {
+    val n: String = cls.name.toString
+    if (n.endsWith("$")) n.dropRight(1) else n
+  }
 
-  private def read(binaryName: String): Option[Vector[JavaMethodOrderMethod]] =
-    val lastDot = binaryName.lastIndexOf('.')
+  private def read(binaryName: String): Option[Vector[JavaMethodOrderMethod]] = {
+    val lastDot: Int = binaryName.lastIndexOf('.')
     val (pkg, simple) =
-      if lastDot < 0 then ("", binaryName)
+      if (lastDot < 0) ("", binaryName)
       else (binaryName.substring(0, lastDot), binaryName.substring(lastDot + 1))
     val found = classpath.iterator
       .flatMap(_.listAllPackages())
@@ -73,99 +77,116 @@ final class JavaMethodOrder(classpath: Classpath):
       .flatMap(_.getClassDataByBinaryName(simple))
       .find(_.hasClassFile)
     found.flatMap(data => ClassfileMethods.parse(data.readClassFileBytes()))
-end JavaMethodOrder
+  }
+}
 
 /** A deliberately minimal classfile reader: just enough to recover `methods[]` order.
   *
-  * Only the constant pool (to resolve method names) and the field/method tables are
-  * walked; attributes are skipped by length. Any malformed input yields `None`, so a jar
-  * this cannot parse costs disambiguator accuracy for that class rather than the run.
+  * Only the constant pool (to resolve method names and descriptors) and the field/method
+  * tables are walked; attributes are skipped by length. Any malformed input yields `None`,
+  * so a jar this cannot parse costs disambiguator accuracy for that class rather than the
+  * whole run.
   */
-private object ClassfileMethods:
+private object ClassfileMethods {
 
   def parse(bytes: IArray[Byte]): Option[Vector[JavaMethodOrderMethod]] =
     try Some(unsafeParse(bytes))
-    catch case _: RuntimeException | _: IndexOutOfBoundsException => None
+    catch {
+      case _: RuntimeException | _: IndexOutOfBoundsException => None
+    }
 
-  private def unsafeParse(bytes: IArray[Byte]): Vector[JavaMethodOrderMethod] =
-    val in = Reader(bytes)
+  private def unsafeParse(bytes: IArray[Byte]): Vector[JavaMethodOrderMethod] = {
+    val in = new Reader(bytes)
     require(in.u4() == 0xcafebabeL, "not a classfile")
     in.skip(4) // minor, major
-    val utf8 = readConstantPool(in)
+    val utf8: Map[Int, String] = readConstantPool(in)
     in.skip(2) // access_flags
     in.skip(2) // this_class
     in.skip(2) // super_class
-    val interfaces = in.u2()
+    val interfaces: Int = in.u2()
     in.skip(2 * interfaces)
     skipMembers(in) // fields
-    val methodCount = in.u2()
+    val methodCount: Int = in.u2()
     val out = Vector.newBuilder[JavaMethodOrderMethod]
-    var i = 0
-    while i < methodCount do
-      val access = in.u2()
-      val nameIndex = in.u2()
-      val descIndex = in.u2()
+    var i: Int = 0
+    while (i < methodCount) {
+      val access: Int = in.u2()
+      val nameIndex: Int = in.u2()
+      val descIndex: Int = in.u2()
       skipAttributes(in)
-      val name = utf8.getOrElse(nameIndex, throw RuntimeException(s"bad name index $nameIndex"))
-      val desc = utf8.getOrElse(descIndex, throw RuntimeException(s"bad descriptor index $descIndex"))
+      val name: String =
+        utf8.getOrElse(nameIndex, throw new RuntimeException(s"bad name index $nameIndex"))
+      val desc: String =
+        utf8.getOrElse(descIndex, throw new RuntimeException(s"bad descriptor index $descIndex"))
       out += JavaMethodOrderMethod(name, (access & 0x0008) != 0, JvmDescriptor.paramTypes(desc))
       i += 1
+    }
     out.result()
-  end unsafeParse
+  }
 
-  private def readConstantPool(in: Reader): Map[Int, String] =
-    val count = in.u2()
+  private def readConstantPool(in: Reader): Map[Int, String] = {
+    val count: Int = in.u2()
     val utf8 = Map.newBuilder[Int, String]
-    var i = 1
-    while i < count do
-      val tag = in.u1()
-      tag match
+    var i: Int = 1
+    while (i < count) {
+      val tag: Int = in.u1()
+      tag match {
         case 1 => // CONSTANT_Utf8
-          val len = in.u2()
+          val len: Int = in.u2()
           utf8 += (i -> in.utf8(len))
-        case 7 | 8 | 16 | 19 | 20 => in.skip(2)
-        case 15                   => in.skip(3)
+        case 7 | 8 | 16 | 19 | 20               => in.skip(2)
+        case 15                                 => in.skip(3)
         case 3 | 4 | 9 | 10 | 11 | 12 | 17 | 18 => in.skip(4)
         case 5 | 6 => // Long and Double occupy two constant-pool slots
           in.skip(8)
           i += 1
-        case other => throw RuntimeException(s"unknown constant pool tag $other")
+        case other => throw new RuntimeException(s"unknown constant pool tag $other")
+      }
       i += 1
+    }
     utf8.result()
-  end readConstantPool
+  }
 
-  private def skipMembers(in: Reader): Unit =
-    val count = in.u2()
-    var i = 0
-    while i < count do
+  private def skipMembers(in: Reader): Unit = {
+    val count: Int = in.u2()
+    var i: Int = 0
+    while (i < count) {
       in.skip(6) // access_flags, name_index, descriptor_index
       skipAttributes(in)
       i += 1
+    }
+  }
 
-  private def skipAttributes(in: Reader): Unit =
-    val count = in.u2()
-    var i = 0
-    while i < count do
+  private def skipAttributes(in: Reader): Unit = {
+    val count: Int = in.u2()
+    var i: Int = 0
+    while (i < count) {
       in.skip(2) // attribute_name_index
-      val len = in.u4()
+      val len: Long = in.u4()
       in.skip(len.toInt)
       i += 1
+    }
+  }
 
-  private final class Reader(bytes: IArray[Byte]):
-    private var pos = 0
+  private final class Reader(bytes: IArray[Byte]) {
+    private var pos: Int = 0
     def u1(): Int = { val v = bytes(pos) & 0xff; pos += 1; v }
     def u2(): Int = (u1() << 8) | u1()
     def u4(): Long = (u2().toLong << 16) | u2().toLong
     def skip(n: Int): Unit = pos += n
-    def utf8(len: Int): String =
+    def utf8(len: Int): String = {
       val arr = new Array[Byte](len)
-      var i = 0
-      while i < len do { arr(i) = bytes(pos + i); i += 1 }
+      var i: Int = 0
+      while (i < len) { arr(i) = bytes(pos + i); i += 1 }
       pos += len
-      String(arr, java.nio.charset.StandardCharsets.UTF_8)
-end ClassfileMethods
+      new String(arr, java.nio.charset.StandardCharsets.UTF_8)
+    }
+  }
+}
 
-/** Top-level so both [[JavaMethodOrder]] and [[ClassfileMethods]] can name it. */
+/** One row of a classfile's `methods[]` table. Top-level so both [[JavaMethodOrder]] and
+  * [[ClassfileMethods]] can name it.
+  */
 final case class JavaMethodOrderMethod(
   name: String,
   isStatic: Boolean,
@@ -174,35 +195,39 @@ final case class JavaMethodOrderMethod(
 
 /** Turns a JVM method descriptor into erased parameter type names.
   *
-  * Spelled the way `tastyquery.Signatures.Signature` spells them -- `int`,
-  * `java.lang.String`, `int[]` -- so a symbol's signature can be matched against a
+  * Spelled the way `tastyquery.Signatures.Signature` spells them -- `scala.Int`,
+  * `java.lang.String`, `scala.Char[]` -- so a symbol's signature can be matched against a
   * classfile row without erasing types ourselves (`Erasure.eraseForSigName` is
   * `private[tastyquery]`).
   */
-object JvmDescriptor:
+object JvmDescriptor {
 
-  /** `(IJ)D` -> `Vector("int", "long")`. */
-  def paramTypes(descriptor: String): Vector[String] =
-    val close = descriptor.indexOf(')')
-    if !descriptor.startsWith("(") || close < 0 then Vector.empty
-    else
+  /** `(IJ)D` -> `Vector("scala.Int", "scala.Long")`. */
+  def paramTypes(descriptor: String): Vector[String] = {
+    val close: Int = descriptor.indexOf(')')
+    if (!descriptor.startsWith("(") || close < 0) Vector.empty
+    else {
       val out = Vector.newBuilder[String]
-      var i = 1
-      while i < close do
+      var i: Int = 1
+      while (i < close) {
         val (tpe, next) = readOne(descriptor, i)
         out += tpe
         i = next
+      }
       out.result()
+    }
+  }
 
   private def readOne(s: String, start: Int): (String, Int) =
-    s.charAt(start) match
+    s.charAt(start) match {
       case '[' =>
         val (base, next) = readOne(s, start + 1)
         (base + "[]", next)
       case 'L' =>
-        val end = s.indexOf(';', start)
+        val end: Int = s.indexOf(';', start)
         (s.substring(start + 1, end).replace('/', '.'), end + 1)
       case prim => (primitive(prim), start + 1)
+    }
 
   /** Primitives carry their *Scala* names.
     *
@@ -211,7 +236,7 @@ object JvmDescriptor:
     * `(scala.Long,scala.Long)` and so on. Spelling these the JVM way silently fails every
     * match and collapses the overloads to `()`.
     */
-  private def primitive(c: Char): String = c match
+  private def primitive(c: Char): String = c match {
     case 'B'   => "scala.Byte"
     case 'C'   => "scala.Char"
     case 'D'   => "scala.Double"
@@ -222,7 +247,8 @@ object JvmDescriptor:
     case 'Z'   => "scala.Boolean"
     case 'V'   => "scala.Unit"
     case other => other.toString
-end JvmDescriptor
+  }
+}
 
 /** Whether classfile declaration order is available to the disambiguator.
   *

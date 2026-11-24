@@ -1,6 +1,7 @@
 package org.scip_code.scip_java.tasty
 
 import tastyquery.Contexts.Context
+import tastyquery.SourcePosition
 import tastyquery.Symbols.*
 import tastyquery.Trees.*
 
@@ -32,16 +33,17 @@ import tastyquery.Trees.*
   * acceptable: those symbols are never referenced from source, so carrying extra metadata
   * for them costs index size, not resolution.
   */
-object TastyExclusions:
+object TastyExclusions {
 
   /** True when `tree` should not produce a definition occurrence. */
-  def excludeDefinition(tree: DefTree)(using Context): Boolean =
-    val pos = tree.pos
+  def excludeDefinition(tree: DefTree)(using Context): Boolean = {
+    val pos: SourcePosition = tree.pos
     // dotty's `tree.span.hasLength`: a zero-extent or absent span means the definition is
     // not present in source, so there is no range to point at.
     pos.isUnknown || pos.isZeroExtent
+  }
 
-  /** True when `sym` is a primary/secondary constructor.
+  /** True when `sym` is a primary or secondary constructor.
     *
     * tasty-query keeps `Symbol.isConstructor` private, so this goes by name, which is what
     * dotty's `nme.CONSTRUCTOR` amounts to anyway.
@@ -56,16 +58,17 @@ object TastyExclusions:
     * compiler never produces. The class's own `typeParams` are emitted separately.
     */
   def skipTypeParams(method: Symbol): Boolean = isConstructor(method)
+
   /** True when `sym` is a companion the compiler generated rather than the author.
     *
     * An `enum` or `case class` gets a companion for free, and its module class is
-    * positioned on the class.s own name. Emitting a definition there would put two
+    * positioned on the class's own name. Emitting a definition there would put two
     * occurrences on one range -- `Color#` and `Color.` -- where the compiler emits only the
     * class. A hand-written `object` has a non-synthetic module value and is unaffected.
     */
   def isGeneratedCompanion(sym: Symbol)(using Context): Boolean =
-    sym match
+    sym match {
       case cls: ClassSymbol if cls.isModuleClass => cls.moduleValue.exists(_.isSynthetic)
       case _                                     => false
-
-end TastyExclusions
+    }
+}

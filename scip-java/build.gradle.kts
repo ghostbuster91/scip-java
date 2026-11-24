@@ -17,6 +17,7 @@ val gradlePluginShadowJar = shadowJarArtifact(":scip-gradle-plugin", "gradlePlug
 dependencies {
     implementation(project(":scip-aggregator"))
     implementation(project(":scip-kotlin-analysis"))
+    implementation(project(":scip-tasty"))
     implementation(project(":scip-semanticdb"))
     implementation(libs.clikt.jvm)
     implementation(libs.kotlin.stdlib)

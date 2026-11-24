@@ -11,6 +11,7 @@ import java.nio.file.StandardCopyOption
 import java.util.stream.Collectors
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
+import kotlin.test.assertTrue
 import kotlin.test.fail
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.DynamicTest
@@ -115,6 +116,13 @@ abstract class BuildToolHarness {
         maxJdk: Int? = null,
         requiresCommand: String? = null,
         substitutions: Map<String, String> = emptyMap(),
+        /**
+         * Substrings the run's output must contain.
+         *
+         * Shard counts alone cannot tell which front-end produced a shard, so a case that cares
+         * has to assert on what the run reported.
+         */
+        expectedOutputContains: List<String> = emptyList(),
         runs: Int = 1,
     ): DynamicTest =
         dynamicTest(name) {
@@ -162,6 +170,12 @@ abstract class BuildToolHarness {
                         expectedError(output)
                     } else {
                         assertEquals(0, exit, "expected success, output:\n$output")
+                        expectedOutputContains.forEach { expected ->
+                            assertTrue(
+                                output.contains(expected),
+                                "expected output to contain \"$expected\", output:\n$output",
+                            )
+                        }
                     }
 
                     val shards = listScipShards(targetroot)

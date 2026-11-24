@@ -25,11 +25,9 @@ import tastyquery.Symbols.*
   *     descriptors is not applied.
   *   - `isSelfSym` is likewise unavailable; self symbols are not enumerated as
   *     declarations, so the `!sym.isSelfSym` conjunct in `isGlobal` is dropped.
-  *   - Overload disambiguators for Java owners come from the classfile `methods[]` table
-  *     via [[JavaMethodOrder]], since a Java symbol has no tree to read order from.
   *   - dotty applies `unescapeUnicode` to names before encoding; this does not.
   */
-object TastySymbols:
+object TastySymbols {
 
   /** The bare-descriptor symbol for `sym`, or `None` if it is not a global symbol.
     *
@@ -38,20 +36,21 @@ object TastySymbols:
     * reproduce. The indexer assigns its own local ids.
     */
   def globalSymbol(sym: Symbol)(using Context, JavaOrderLookup): Option[String] =
-    if isGlobal(sym) then Some(symbolName(sym)) else None
+    if (isGlobal(sym)) Some(symbolName(sym)) else None
 
   private def symbolName(sym: Symbol)(using Context, JavaOrderLookup): String =
     ScipSymbols.global(ownerPrefix(sym), descriptor(sym))
 
   /** dotty: `if !owner.isRoot then addSymName(b, owner)` -- the root contributes nothing. */
   private def ownerPrefix(sym: Symbol)(using Context, JavaOrderLookup): String =
-    sym.owner match
-      case null                           => ScipSymbols.ROOT_PACKAGE
-      case owner if isRootPackage(owner)  => ScipSymbols.ROOT_PACKAGE
-      case owner                          => symbolName(owner)
+    sym.owner match {
+      case null                          => ScipSymbols.ROOT_PACKAGE
+      case owner if isRootPackage(owner) => ScipSymbols.ROOT_PACKAGE
+      case owner                         => symbolName(owner)
+    }
 
   private def descriptor(sym: Symbol)(using Context, JavaOrderLookup): Descriptor =
-    sym match
+    sym match {
       // A Java class's statics live in a module class, but dotty spells them with the
       // *class* descriptor: `isAllOf(JavaModule)` takes the `#` branch, so a static is
       // `java/lang/Math#max().` and not `java/lang/Math.max().`. Detected via
@@ -81,8 +80,7 @@ object TastySymbols:
         Descriptor(Descriptor.Kind.Term, term.name.toString)
       case tpe: TypeSymbol =>
         Descriptor(Descriptor.Kind.Type, tpe.name.toString)
-      case other =>
-        Descriptor(Descriptor.Kind.Term, other.name.toString)
+    }
 
   /** dotty `Scala3.isGlobal`:
     * {{{
@@ -90,12 +88,14 @@ object TastySymbols:
     * }}}
     */
   private def isGlobal(sym: Symbol)(using Context): Boolean =
-    sym match
+    sym match {
       case _: PackageSymbol => true
       case _ =>
-        sym.owner match
+        sym.owner match {
           case null  => false
           case owner => (isParam(sym) || isClassLike(owner)) && isGlobal(owner)
+        }
+    }
 
   /** dotty's `sym.owner.isClass`.
     *
@@ -111,23 +111,25 @@ object TastySymbols:
     * the owning method's parameter lists.
     */
   private def isParam(sym: Symbol)(using Context): Boolean =
-    sym.owner match
+    sym.owner match {
       case owner: TermSymbol if owner.isMethod =>
         owner.paramSymss.exists {
           case Left(termParams)  => termParams.exists(_ eq sym)
           case Right(typeParams) => typeParams.exists(_ eq sym)
         }
       case _ => false
+    }
 
   /** The module class name without its trailing `$`, e.g. `Math$` -> `Math`. */
   private def moduleClassName(cls: ClassSymbol)(using Context): String =
     cls.moduleValue.map(_.name.toString).getOrElse {
-      val n = cls.name.toString
-      if n.endsWith("$") then n.dropRight(1) else n
+      val n: String = cls.name.toString
+      if (n.endsWith("$")) n.dropRight(1) else n
     }
 
   private def isRootPackage(sym: Symbol)(using Context): Boolean =
-    sym match
+    sym match {
       case pkg: PackageSymbol => pkg.owner == null
       case _                  => false
-end TastySymbols
+    }
+}

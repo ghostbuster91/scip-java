@@ -229,19 +229,44 @@ you encounter issues using the Kotlin support.
 
 ### Scala
 
-Scala is indexed through [SemanticDB](https://scalameta.org/docs/semanticdb/specification.html),
-the semantic index format the Scala 3 compiler emits with `-Xsemanticdb`.
-`scip-java` turns those files into SCIP, so the accuracy comes from the Scala
-compiler rather than from a reimplementation of its type checker.
+Scala 3 is indexed from [TASTy](https://docs.scala-lang.org/scala3/guides/tasty-overview.html),
+the fully elaborated syntax trees the compiler writes beside every class file,
+read with [tasty-query](https://github.com/scalacenter/tasty-query). The accuracy
+comes from the Scala compiler rather than from a reimplementation of its type
+checker.
 
-sbt knows how to enable this (`semanticdbEnabled`), which is why Scala support is
-currently limited to the sbt build tool. Scala and Java sources in the same module
-end up in one index with references resolving across the two languages, because
-both halves emit the same symbol format.
+Nothing has to be enabled for this: TASTy is emitted by every Scala 3 compilation
+whether the build asks for it or not. The injected sbt plugin only reports where
+the class files and the compile classpath are — the classpath because TASTy leaves
+the types of most subexpressions implicit, to be reconstructed from it, and so
+cannot be read without one.
 
-Scala 2 is not a supported target. Such a build goes down the same path, because
-sbt wires up the `semanticdb-scalac` compiler plugin for it, but nothing about it
-is tested.
+Scala and Java sources in the same module end up in one index with references
+resolving across the two languages, because both halves emit the same symbol
+format. That equivalence is enforced by tests that compare the symbols and
+occurrences read from TASTy against the ones the compiler itself records.
+
+[SemanticDB](https://scalameta.org/docs/semanticdb/specification.html) is still
+read, covering any source TASTy did not describe — never the same source twice.
+Enabling it is sbt's own `semanticdbEnabled`, turned on with
+`-Dsbt.semanticdb=true`.
+
+Scala 2 is not a supported target. Those projects emit no TASTy at all, so they
+fall back to SemanticDB via the `semanticdb-scalac` compiler plugin that sbt wires
+up, but nothing about it is tested.
+
+#### What TASTy does not describe
+
+One `scip-java` release reads one range of TASTy versions, and TASTy rejects a
+file from a *newer* Scala 3 minor outright. Indexing a repository built with a
+Scala 3 newer than the release supports therefore stops with a message naming the
+version it found, the version it supports, and the branch to use instead — rather
+than quietly producing an index that describes none of the Scala.
+
+Two kinds of occurrence are missing by construction, because tasty-query does not
+expose them: references to packages, whether in a `package` clause or a qualified
+type name, and `import` statements at the top of a file. Imports inside a class or
+object body are indexed normally.
 
 #### Cross-built repositories
 
@@ -352,9 +377,11 @@ injects a small sbt `AutoPlugin` through `-Dsbt.global.plugins` that:
   project does not aggregate,
 - records the Maven coordinates of every project and of the jars on its
   classpath, so cross-repository navigation works without extra configuration,
-- reports where scalac writes its SemanticDB output, which `scip-java` converts
-  into SCIP shards. Indexing turns this on with `-Dsbt.semanticdb=true`; see
-  [Scala](#scala).
+- reports the class directories and compile classpath of every Scala 3 project, which
+  is where `scip-java` reads the TASTy it indexes Scala 3 sources from, and where
+  scalac writes its SemanticDB output, which covers anything TASTy could not describe.
+  Indexing turns SemanticDB on with `-Dsbt.semanticdb=true`; TASTy needs nothing turned
+  on. See [Scala](#scala).
 
 Keep the following limitations in mind:
 
@@ -363,7 +390,8 @@ Keep the following limitations in mind:
 | sbt 1.x                                | ❌        | Use sbt 2.1 or newer.                                                                     |
 | Scala.js / Scala Native                | ❌        | Those projects are skipped; a cross-project is indexed through its JVM platform only.      |
 | Builds setting `javaHome`              | ❌        | A build-defined `javaHome` overrides the wrapper, so Java sources are not indexed.         |
-| Builds setting `semanticdbEnabled`     | ❌        | Setting it to `false` in the build overrides `-Dsbt.semanticdb`, so Scala is not indexed.  |
+| Builds setting `semanticdbEnabled`     | ⚠️        | Setting it to `false` disables the SemanticDB fallback. Scala 3 is still indexed from TASTy. |
+| Scala 3 newer than this release        | ❌        | TASTy rejects a newer minor outright; indexing stops and names the version. See [Scala](#scala). |
 
 Because `-Dsbt.global.plugins` replaces the global plugins directory for the
 duration of indexing, plugins installed in `~/.sbt` are not loaded. Builds that

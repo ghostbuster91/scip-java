@@ -20,6 +20,12 @@
 //      SemanticDB files it converts into shards to index Scala sources.
 //      Emitting them is sbt's own `semanticdbEnabled`, turned on by passing
 //      `-Dsbt.semanticdb=true`, so this plugin only reports the locations.
+//   4. Writes the class directories and compile classpath of every Scala 3
+//      project to `*.tasty-roots.txt` and `*.tasty-classpath.txt`, which is how
+//      scip-java finds the TASTy it indexes Scala 3 sources from. TASTy needs no
+//      compiler flag -- every Scala 3 compilation emits it beside the class
+//      files -- so this reports locations only, as in (3). The classpath goes
+//      with it because TASTy cannot be read without one.
 //
 // Both paths arrive as the `scip.javaHome` and `scip.targetroot` system
 // properties. Each is optional: without them the plugin is a no-op, which keeps
@@ -49,6 +55,9 @@ object ScipSbtPlugin extends AutoPlugin {
     val scipWriteSemanticdbRoots = taskKey[Unit](
       "Writes the directories scalac emits SemanticDB files into for scip-java."
     )
+    val scipWriteTastyRoots = taskKey[Unit](
+      "Writes the class directories holding TASTy, and the compile classpath, for scip-java."
+    )
   }
   import autoImport._
 
@@ -62,6 +71,7 @@ object ScipSbtPlugin extends AutoPlugin {
       Seq(
         scipWriteDependencies := writeDependencies.value,
         scipWriteSemanticdbRoots := writeSemanticdbRoots.value,
+        scipWriteTastyRoots := writeTastyRoots.value,
         // `scipCompileAll` names every project it wants, so aggregation can only
         // pull back in the projects it deliberately left out: the Scala.js and
         // Scala Native rows, and the rows built at another Scala version. Asking
@@ -70,6 +80,7 @@ object ScipSbtPlugin extends AutoPlugin {
         compile / aggregate := false,
         scipWriteDependencies / aggregate := false,
         scipWriteSemanticdbRoots / aggregate := false,
+        scipWriteTastyRoots / aggregate := false,
       )
 
   /**
@@ -131,6 +142,7 @@ object ScipSbtPlugin extends AutoPlugin {
             project + "/Test/compile",
             project + "/scipWriteDependencies",
             project + "/scipWriteSemanticdbRoots",
+            project + "/scipWriteTastyRoots",
           )
         })
         switch ::: List(clean, compile) ::: state
@@ -194,6 +206,37 @@ object ScipSbtPlugin extends AutoPlugin {
       ".semanticdb-roots.txt",
       roots.map(_.toString).distinct,
     )
+  }
+
+  /**
+   * Reports where the Scala 3 compiler put its TASTy, and the classpath needed to read it.
+   *
+   * Unlike SemanticDB, TASTy needs no compiler flag -- every Scala 3 compilation emits it next to
+   * the class files -- so only the locations have to be reported. The classpath is reported too
+   * because TASTy cannot be interpreted without one: it leaves the types of most subexpressions
+   * implicit, to be reconstructed from the classpath.
+   *
+   * Only Scala 3 rows are reported. Scala 2 emits no TASTy at all, and reporting its class
+   * directory would make scip-java read a directory it can find nothing in.
+   */
+  private def writeTastyRoots: Def.Initialize[Task[Unit]] = Def.task {
+    val converter = fileConverter.value
+    val projectId = thisProject.value.id
+    val base = baseDirectory.value
+    val isScala3 = scalaBinaryVersion.value == "3"
+
+    val classDirs =
+      if (isScala3)
+        Seq((Compile / classDirectory).value.toString, (Test / classDirectory).value.toString)
+      else Seq.empty
+    val classpath =
+      if (isScala3)
+        ((Compile / dependencyClasspath).value ++ (Test / dependencyClasspath).value)
+          .map(entry => converter.toPath(entry.data).toString)
+      else Seq.empty
+
+    write(projectId, base, ".tasty-roots.txt", classDirs.distinct)
+    write(projectId, base, ".tasty-classpath.txt", classpath.distinct)
   }
 
   /**

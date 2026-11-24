@@ -1,5 +1,7 @@
 package org.scip_code.scip_java.buildtools
 
+import java.net.URI
+import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
@@ -7,14 +9,19 @@ import java.util.Properties
 import org.scip_code.scip_java.Embedded
 import org.scip_code.scip_java.commands.IndexCommand
 import org.scip_code.scip_java.semanticdb.SemanticdbToScip
+import org.scip_code.scip_java.tasty.TastyToScip
+import org.scip_code.scip_java.tasty.TastyVersion
 
 /**
  * Indexes an sbt build by pointing sbt's `javaHome` at scip-java's `javac` wrapper: zinc forks
  * `$javaHome/bin/javac` for every Java compilation whenever that setting is defined, and the
  * wrapper adds `-Xplugin:scip` to the compiler options.
  *
- * Scala sources are indexed through SemanticDB instead: sbt makes scalac emit it, and
- * [SemanticdbToScip] converts the result into shards of the same kind.
+ * Scala 3 sources are indexed from TASTy, which every Scala 3 compilation emits next to the class
+ * files whether or not the build asks for it, so [TastyToScip] needs nothing from sbt beyond being
+ * told where the class directories and the compile classpath are. SemanticDB then fills in only the
+ * sources TASTy could not describe -- Scala 2 rows, and anything whose TASTy this build of
+ * scip-java is too old to read.
  *
  * The `javaHome` setting, a command that compiles every project and the metadata used for
  * cross-repository navigation all come from an `AutoPlugin` that gets injected into the build with
@@ -43,7 +50,19 @@ class SbtBuildTool(index: IndexCommand) : BuildTool("sbt", index) {
         }
         val result = runBuild()
         if (result.exitCode == 0) {
-            convertSemanticdb()
+            // TASTy first, and SemanticDB only for what it did not cover. Both derive a shard
+            // path from the source path alone, so letting them both write the same source would
+            // silently overwrite one with the other.
+            val unsupported = TastyVersion.unsupported(scalaVersions())
+            if (unsupported.isNotEmpty()) {
+                // Reported rather than worked around. TASTy rejects a newer minor outright, so
+                // carrying on would quietly produce an index describing none of the Scala, and
+                // version skew is handled by using the matching scip-java branch instead.
+                index.app.error(TastyVersion.mismatchMessage(unsupported))
+                return 1
+            }
+            val covered = convertTasty()
+            convertSemanticdb(covered)
             reportMissingScipOutput()
         }
         return generateScipFromTargetroot(result, targetroot(), index)
@@ -54,11 +73,14 @@ class SbtBuildTool(index: IndexCommand) : BuildTool("sbt", index) {
      * indexed. The directories to read come from `*.semanticdb-roots.txt` files that the injected
      * sbt plugin writes, one per project.
      */
-    private fun convertSemanticdb() {
+    private fun convertSemanticdb(alreadyCovered: Set<String>) {
         val roots =
             readReportedPaths(".semanticdb-roots.txt").filter { Files.isDirectory(it) }.distinct()
         if (roots.isEmpty()) return
-        val result = SemanticdbToScip(index.workingDirectory, targetroot()).convert(roots)
+        val result =
+            SemanticdbToScip(index.workingDirectory, targetroot())
+                .skipping(alreadyCovered)
+                .convert(roots)
         // Warnings, not errors: each one costs at most one source file's worth of
         // index, and reporting them as errors would stop the aggregator from
         // writing an index for everything that did convert.
@@ -71,6 +93,80 @@ class SbtBuildTool(index: IndexCommand) : BuildTool("sbt", index) {
             index.app.info("converted ${result.shardsWritten} SemanticDB file(s) into SCIP shards")
         }
     }
+
+    /**
+     * The Scala 3 versions this build compiles against, read back from the coordinates the
+     * injected plugin reported.
+     *
+     * `scala3-library_3` is on the classpath of every Scala 3 project, and its revision is the
+     * Scala version, so no extra reporting is needed to find out whether this build of
+     * scip-java can read the TASTy that was produced.
+     */
+    private fun scalaVersions(): List<String> {
+        val targetroot = targetroot()
+        if (!Files.isDirectory(targetroot)) return emptyList()
+        return Files.list(targetroot).use { stream ->
+            stream
+                .filter {
+                    Files.isRegularFile(it) &&
+                        it.fileName.toString().endsWith(".dependencies.txt")
+                }
+                .toList()
+        }
+            .flatMap { Files.readAllLines(it) }
+            .mapNotNull { line ->
+                val fields = line.split("\t")
+                if (fields.size >= 3 && fields[1] == "scala3-library_3") fields[2] else null
+            }
+            .distinct()
+    }
+
+    /**
+     * Turns the TASTy the Scala 3 compiler emitted into SCIP shards, and reports which sources it
+     * covered so [convertSemanticdb] can leave those alone.
+     *
+     * The class directories and the compile classpath both come from `*.tasty-roots.txt` and
+     * `*.tasty-classpath.txt`, which the injected sbt plugin writes. The classpath is needed
+     * because TASTy leaves the types of most subexpressions implicit, to be reconstructed from
+     * the classpath, so it cannot be read without one.
+     */
+    private fun convertTasty(): Set<String> {
+        val classDirs =
+            readReportedPaths(".tasty-roots.txt").filter { Files.isDirectory(it) }.distinct()
+        if (classDirs.isEmpty()) return emptySet()
+        // A project's class directory also appears on every dependent project's classpath, so it
+        // is reported twice. Dropping the duplicates keeps `ClasspathLoaders.read` -- which
+        // loads every entry eagerly into memory -- from holding the same classes twice, and
+        // keeps one directory from being enumerated as both a project and a dependency.
+        val classpath =
+            (readReportedPaths(".tasty-classpath.txt").distinct() - classDirs.toSet()) +
+                jdkClasspath()
+
+        val result =
+            TastyToScip.convert(index.workingDirectory, targetroot(), classDirs, classpath)
+        // Warnings, not errors, for the same reason as SemanticDB: the worst a file this cannot
+        // read should cost is its own document, and SemanticDB may well cover it anyway.
+        // Accessors on the Scala-defined result are methods, not Kotlin properties.
+        val warnings = result.warnings()
+        warnings.take(MAX_REPORTED_WARNINGS).forEach { index.app.warning(it) }
+        val unreported = warnings.size - MAX_REPORTED_WARNINGS
+        if (unreported > 0) {
+            index.app.warning("$unreported more TASTy conversion warning(s) not shown")
+        }
+        if (result.shardsWritten() > 0) {
+            index.app.info("indexed ${result.shardsWritten()} Scala 3 source(s) from TASTy")
+        }
+        return result.coveredSources()
+    }
+
+    /**
+     * The JRE, which tasty-query requires on the classpath explicitly -- it resolves even
+     * `java.lang` through the classpath it is given and has no implicit view of the platform.
+     */
+    private fun jdkClasspath(): List<Path> =
+        listOf(
+            FileSystems.getFileSystem(URI.create("jrt:/")).getPath("modules", "java.base")
+        )
 
     /** Reads the line-separated paths out of every `*<suffix>` file the sbt plugin wrote. */
     private fun readReportedPaths(suffix: String): List<Path> {

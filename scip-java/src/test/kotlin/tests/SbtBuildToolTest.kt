@@ -52,10 +52,14 @@ class SbtBuildToolTest : BuildToolHarness() {
             checkBuild(
                 "scala",
                 fixture = "sbt/scala",
-                // One shard from SemanticDB for the Scala source, one from the
-                // javac plugin for the Java source.
+                // One shard from TASTy for the Scala source, one from the javac
+                // plugin for the Java source.
                 expectedScipFiles = 2,
                 requiresCommand = "sbt",
+                // The count alone cannot distinguish the two Scala front-ends: if TASTy wrote
+                // nothing, SemanticDB would cover the same source and the count would be
+                // unchanged. Assert that TASTy is the one that did it.
+                expectedOutputContains = listOf("indexed 1 Scala 3 source(s) from TASTy"),
                 expectedPackages =
                     """
                     |maven:org.scala-lang:scala-library:2.13.16

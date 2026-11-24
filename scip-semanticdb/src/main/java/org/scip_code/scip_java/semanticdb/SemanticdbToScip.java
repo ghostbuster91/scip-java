@@ -62,6 +62,14 @@ public final class SemanticdbToScip {
 
   private final Path sourceroot;
   private final Path targetroot;
+  /**
+   * Source paths another front-end already wrote a shard for, source-root-relative and
+   * unix-style, as {@link ScipShardPaths#relativePath} spells them.
+   *
+   * <p>A shard path is derived from the source path alone, so two front-ends converting the same
+   * source would silently overwrite each other and the index would describe a mixture of the two.
+   */
+  private Set<String> alreadyCovered = Set.of();
   private final List<String> warnings = new ArrayList<>();
   private final List<String> unformattableSignatures = new ArrayList<>();
   private final Set<String> unparseableSymbols = new LinkedHashSet<>();
@@ -70,6 +78,17 @@ public final class SemanticdbToScip {
   public SemanticdbToScip(Path sourceroot, Path targetroot) {
     this.sourceroot = sourceroot;
     this.targetroot = targetroot;
+  }
+
+  /**
+   * Declares source paths that another front-end has already covered, so this one skips them.
+   *
+   * <p>Used by the TASTy front-end, which runs first for Scala 3 and leaves SemanticDB to fill in
+   * only what it could not read.
+   */
+  public SemanticdbToScip skipping(Set<String> coveredSources) {
+    this.alreadyCovered = Set.copyOf(coveredSources);
+    return this;
   }
 
   /** Converts every {@code *.semanticdb} file found under each of {@code semanticdbRoots}. */
@@ -157,6 +176,11 @@ public final class SemanticdbToScip {
 
   private void writeShard(ScipTextDocument doc) throws IOException {
     Path absolutePath = Paths.get(URI.create(doc.semanticdb.getUri()));
+    if (alreadyCovered.contains(ScipShardPaths.relativePath(sourceroot, absolutePath))) {
+      // The TASTy front-end already described this source. Writing here would overwrite its
+      // shard, because the shard path is a function of the source path alone.
+      return;
+    }
     Optional<Path> shardPath = ScipShardPaths.shardPath(targetroot, sourceroot, absolutePath);
     if (shardPath.isEmpty()) {
       // A source outside the sourceroot cannot be addressed by a relative path in
