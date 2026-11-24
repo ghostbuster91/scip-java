@@ -56,4 +56,16 @@ object TastyExclusions:
     * compiler never produces. The class's own `typeParams` are emitted separately.
     */
   def skipTypeParams(method: Symbol): Boolean = isConstructor(method)
+  /** True when `sym` is a companion the compiler generated rather than the author.
+    *
+    * An `enum` or `case class` gets a companion for free, and its module class is
+    * positioned on the class.s own name. Emitting a definition there would put two
+    * occurrences on one range -- `Color#` and `Color.` -- where the compiler emits only the
+    * class. A hand-written `object` has a non-synthetic module value and is unaffected.
+    */
+  def isGeneratedCompanion(sym: Symbol)(using Context): Boolean =
+    sym match
+      case cls: ClassSymbol if cls.isModuleClass => cls.moduleValue.exists(_.isSynthetic)
+      case _                                     => false
+
 end TastyExclusions

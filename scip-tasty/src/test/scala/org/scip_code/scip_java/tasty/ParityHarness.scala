@@ -227,10 +227,63 @@ object ParityHarness:
       .toList
 
   /** tasty-query requires the JRE to be put on the classpath explicitly. */
-  private def jdkPaths: List[Path] =
+  def jdkPaths: List[Path] =
     List(
       java.nio.file.FileSystems
         .getFileSystem(java.net.URI.create("jrt:/"))
         .getPath("modules", "java.base")
     )
 end ParityHarness
+
+/** Occurrence-level comparison: symbol *and* range, which is what navigation actually uses.
+  *
+  * Symbol parity alone does not prove the index is usable -- a correct symbol at the wrong
+  * range is still a broken "go to definition". This is also where the position handling gets
+  * exercised: name ranges derived from `pointOffset`, and the per-file filter that keeps
+  * occurrences from `Inlined` bodies out of the wrong document.
+  */
+object OccurrenceParity:
+
+  /** `(symbol, startLine, startChar, endLine, endChar)`, global symbols only. */
+  type Key = (String, Int, Int, Int, Int)
+
+  def fromSemanticdb(root: Path): Set[Key] =
+    val builder = Set.newBuilder[Key]
+    Using.resource(Files.walk(root)) { stream =>
+      stream.iterator().asScala
+        .filter(_.getFileName.toString.endsWith(".semanticdb"))
+        .foreach { file =>
+          val docs = Semanticdb.TextDocuments.parseFrom(Files.readAllBytes(file))
+          docs.getDocumentsList.asScala.foreach { doc =>
+            doc.getOccurrencesList.asScala.foreach { occ =>
+              if isGlobal(occ.getSymbol) then
+                val r = occ.getRange
+                builder += ((occ.getSymbol, r.getStartLine, r.getStartCharacter, r.getEndLine, r.getEndCharacter))
+            }
+          }
+        }
+    }
+    builder.result()
+
+  /** Reads back the `.scip` shards `TastyToScip` wrote under `targetRoot`. */
+  def fromShards(targetRoot: Path): Set[Key] =
+    val builder = Set.newBuilder[Key]
+    Using.resource(Files.walk(targetRoot)) { stream =>
+      stream.iterator().asScala
+        .filter(_.getFileName.toString.endsWith(".scip"))
+        .foreach { file =>
+          val index = org.scip_code.scip.Index.parseFrom(Files.readAllBytes(file))
+          index.getDocumentsList.asScala.foreach { doc =>
+            doc.getOccurrencesList.asScala.foreach { occ =>
+              if isGlobal(occ.getSymbol) then
+                val r = org.scip_code.scip_java.shared.ScipRange.from(occ)
+                builder += ((occ.getSymbol, r.startLine, r.startCharacter, r.endLine, r.endCharacter))
+            }
+          }
+        }
+    }
+    builder.result()
+
+  private def isGlobal(sym: String): Boolean =
+    sym.nonEmpty && !sym.startsWith("local") && !sym.contains("<?>")
+end OccurrenceParity
