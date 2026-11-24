@@ -7,6 +7,7 @@ import java.{util as ju}
 
 import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
+import scala.util.control.NonFatal
 
 import org.scip_code.scip.{Document, SymbolInformation}
 import org.scip_code.scip_java.shared.{ScipShardPaths, ScipShardWriter}
@@ -68,7 +69,12 @@ object TastyToScip {
         // jar, or running out of memory on a very large classpath. Scala indexing failing
         // wholesale must still leave the Java and Kotlin shards already on disk to be
         // aggregated into an index.
-        case e: Exception =>
+        //
+        // `NonFatal` rather than `Exception`, because tasty-query reports some malformed
+        // input with `assert`, which throws `AssertionError` -- an `Error`, not an
+        // `Exception`. Indexing tapir hit exactly that while reading an annotation, and an
+        // `Exception` handler let it escape and take the whole run down.
+        case NonFatal(e) =>
           warnings += s"TASTy indexing failed, leaving Scala sources to SemanticDB: $e"
           0
         case e: StackOverflowError =>
@@ -128,7 +134,9 @@ object TastyToScip {
         }
       } catch {
         case e: IOException        => warnings += s"failed to write a shard for $pickledPath: $e"
-        case e: Exception          => warnings += s"failed to index $pickledPath: $e"
+        // `NonFatal` covers `AssertionError`, which tasty-query throws on some malformed
+        // input; an `Exception` handler would let it escape and end the run.
+        case NonFatal(e)           => warnings += s"failed to index $pickledPath: $e"
         case e: StackOverflowError => warnings += s"failed to index $pickledPath: $e"
       }
     }
@@ -193,31 +201,58 @@ object TastyToScip {
     // `UnknownClasspathEntry` for it rather than returning nothing. Skipped silently: a
     // project with no test sources is entirely normal and not worth a warning.
     for (entry <- projectEntries if entry.listAllPackages().nonEmpty) {
-      val roots: List[TermOrTypeSymbol] =
-        try summon[Context].findSymbolsByClasspathEntry(entry).toList
-        catch {
-          // Every tasty-query exception extends `Exception`, not `RuntimeException`, so
-          // catching the latter would miss all of them -- including `TastyFormatException`,
-          // which is the one a version mismatch raises.
-          case e: Exception =>
-            warnings += s"failed to enumerate $entry: $e"
-            Nil
-        }
-      for (case cls: ClassSymbol <- roots) {
-        try
-          cls.tree.foreach { tree =>
-            val path: String = tree.pos.sourceFile.path
-            if (path.nonEmpty) grouped.getOrElseUpdate(path, mutable.ListBuffer.empty) += cls
+      eachRoot(entry, warnings).foreach {
+        case cls: ClassSymbol =>
+          try
+            cls.tree.foreach { tree =>
+              val path: String = tree.pos.sourceFile.path
+              if (path.nonEmpty) grouped.getOrElseUpdate(path, mutable.ListBuffer.empty) += cls
+            }
+          catch {
+            case NonFatal(e) =>
+              // A TASTy version mismatch surfaces here, lazily, rather than from
+              // `ClasspathLoaders.read`. Report it against the class, not the run.
+              warnings += s"failed to read the tree of ${cls.displayFullName}: $e"
           }
-        catch {
-          case e: Exception =>
-            // A TASTy version mismatch surfaces here, lazily, rather than from
-            // `ClasspathLoaders.read`. Report it against the class, not the run.
-            warnings += s"failed to read the tree of ${cls.displayFullName}: $e"
-        }
+        case _ => ()
       }
     }
     grouped.view.mapValues(_.toList).toList
+  }
+
+  /** The roots of one classpath entry, yielding what it can and warning about the rest.
+    *
+    * Pulled one at a time rather than with `.toList`, because the `Iterable` is lazy and
+    * reading a root can throw: tasty-query hits an `assert` on some classes. Forcing the
+    * whole enumeration makes one unreadable class cost every source in that module --
+    * indexing tapir lost about 80 files that way, three bad test classes at a time.
+    */
+  private def eachRoot(
+    entry: ClasspathEntry,
+    warnings: mutable.ListBuffer[String],
+  )(using Context): List[TermOrTypeSymbol] = {
+    val iterator =
+      try summon[Context].findSymbolsByClasspathEntry(entry).iterator
+      catch {
+        case NonFatal(e) =>
+          warnings += s"failed to enumerate $entry: $e"
+          Iterator.empty
+      }
+    val roots = List.newBuilder[TermOrTypeSymbol]
+    var running = true
+    while (running) {
+      try if (iterator.hasNext) roots += iterator.next() else running = false
+      catch {
+        case NonFatal(e) =>
+          // Everything gathered before the failure is kept; the rest of this entry is given
+          // up, because a thrown iterator cannot be safely resumed. That is still far
+          // better than `.toList`, which discarded the whole entry on any failure. The
+          // class cannot be named -- it is the one being read -- so the entry is.
+          warnings += s"failed to read a class in $entry: $e"
+          running = false
+      }
+    }
+    roots.result()
   }
 
   /** The source-root-relative path for a path as pickled into TASTy, if it is under the root.
