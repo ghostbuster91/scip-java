@@ -2,10 +2,9 @@ package org.scip_code.scip_java.tasty
 
 import scala.collection.mutable
 
-import org.scip_code.scip.{Document, Occurrence, Relationship, SymbolInformation, SymbolRole}
+import org.scip_code.scip.{Document, Occurrence, SymbolRole}
 import org.scip_code.scip_java.shared.{ScipDocumentBuilder, ScipRange, ScipSymbols}
 import tastyquery.Contexts.Context
-import tastyquery.Modifiers.TermSymbolKind
 import tastyquery.SourcePosition
 import tastyquery.Symbols.*
 import tastyquery.Traversers
@@ -32,11 +31,8 @@ final class TastyDocumentIndexer(
   private val lines: LineIndex = LineIndex.of(text)
   private val builder: ScipDocumentBuilder = new ScipDocumentBuilder()
   private val describedSymbols = mutable.HashSet.empty[String]
-
-  /** Every method overrides something on `Object`; both `SemanticdbToScip` and
-    * `ScipAggregator` filter those out, so it is done at the source here too.
-    */
-  private val IgnoredOverriddenSymbol: String = "java/lang/Object#"
+  private val defined = mutable.HashSet.empty[String]
+  private val referenced = mutable.HashMap.empty[String, Symbol]
 
   /** Local ids, bucketed the way dotty buckets them.
     *
@@ -50,6 +46,16 @@ final class TastyDocumentIndexer(
   private var nextLocalId: Int = 0
 
   def result(): Document = builder.build("scala", relativePath, text)
+
+  /** Global symbols this document defines. */
+  def definedSymbols: Set[String] = defined.toSet
+
+  /** Global symbols this document references, paired with the symbol they resolved to.
+    *
+    * The caller subtracts the definitions found across every document to get the ones that
+    * live outside the indexed sources, which are the ones worth describing as external.
+    */
+  def referencedSymbols: Map[String, Symbol] = referenced.toMap
 
   def index(tree: Tree): Unit = traverser.traverse(tree)
 
@@ -114,6 +120,7 @@ final class TastyDocumentIndexer(
       nameRange(tree.pos, name).foreach { range =>
         symbolFor(sym, tree.pos, name).foreach { symbol =>
           emit(symbol, range, Occurrence.newBuilder().setSymbolRoles(SymbolRole.Definition_VALUE))
+          defined += symbol
           describe(sym, symbol, name)
         }
       }
@@ -125,6 +132,9 @@ final class TastyDocumentIndexer(
     nameRange(pos, name).foreach { range =>
       symbolFor(sym, pos, name).foreach { symbol =>
         emit(symbol, range, Occurrence.newBuilder())
+        // Recorded whether or not it turns out to be external; only the caller, which sees
+        // every document, knows which referenced symbols are defined nowhere in the sources.
+        if (ScipSymbols.isGlobal(symbol)) referenced.getOrElseUpdate(symbol, sym)
       }
     }
   }
@@ -150,44 +160,7 @@ final class TastyDocumentIndexer(
     }
 
   private def describe(sym: Symbol, symbol: String, name: String): Unit =
-    if (describedSymbols.add(symbol)) {
-      val info = SymbolInformation.newBuilder().setSymbol(symbol).setDisplayName(name)
-      kindOf(sym).foreach(info.setKind)
-      overrides(sym).foreach(info.addRelationships)
-      builder.addSymbol(info.build())
-    }
-
-  private def overrides(sym: Symbol): List[Relationship] =
-    sym match {
-      case t: TermOrTypeSymbol =>
-        scala.util.Try(t.allOverriddenSymbols.toList).getOrElse(Nil).flatMap { parent =>
-          TastySymbols
-            .globalSymbol(parent)
-            .filter(_ != IgnoredOverriddenSymbol)
-            .map(s => Relationship.newBuilder().setSymbol(s).setIsImplementation(true).build())
-        }
-      case _ => Nil
-    }
-
-  private def kindOf(sym: Symbol): Option[SymbolInformation.Kind] =
-    sym match {
-      case cls: ClassSymbol =>
-        if (cls.isModuleClass) Some(SymbolInformation.Kind.Object)
-        else if (cls.isTrait) Some(SymbolInformation.Kind.Trait)
-        else if (cls.isEnum) Some(SymbolInformation.Kind.Enum)
-        else Some(SymbolInformation.Kind.Class)
-      case _: TypeParamSymbol => Some(SymbolInformation.Kind.TypeParameter)
-      case _: TypeSymbol      => Some(SymbolInformation.Kind.Type)
-      case t: TermSymbol =>
-        t.kind match {
-          case TermSymbolKind.Module  => Some(SymbolInformation.Kind.Object)
-          case TermSymbolKind.Var     => Some(SymbolInformation.Kind.Variable)
-          case TermSymbolKind.Val     => Some(SymbolInformation.Kind.Field)
-          case TermSymbolKind.LazyVal => Some(SymbolInformation.Kind.Field)
-          case TermSymbolKind.Def     => Some(SymbolInformation.Kind.Method)
-        }
-      case _ => None
-    }
+    if (describedSymbols.add(symbol)) builder.addSymbol(TastyDescriber.describe(sym, symbol, name))
 
   /** The range covering just the identifier.
     *

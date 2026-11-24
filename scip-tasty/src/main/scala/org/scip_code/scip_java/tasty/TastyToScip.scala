@@ -8,7 +8,7 @@ import java.{util as ju}
 import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
 
-import org.scip_code.scip.Document
+import org.scip_code.scip.{Document, SymbolInformation}
 import org.scip_code.scip_java.shared.{ScipShardPaths, ScipShardWriter}
 import tastyquery.Classpaths.{Classpath, ClasspathEntry}
 import tastyquery.Contexts
@@ -88,6 +88,8 @@ object TastyToScip {
     covered: mutable.LinkedHashSet[String],
   ): Int = {
     var written: Int = 0
+    val defined = mutable.HashSet.empty[String]
+    val referenced = mutable.LinkedHashMap.empty[String, Symbol]
     val projectEntries: List[Path] = classDirs.asScala.toList
     val entries: Classpath = ClasspathLoaders.read(projectEntries ++ classpath.asScala.toList)
     // `findSymbolsByClasspathEntry` compares entries by `equals`, so the instances handed to
@@ -110,6 +112,10 @@ object TastyToScip {
                 val indexer = new TastyDocumentIndexer(pickledPath, relativePath, text)
                 classes.foreach(cls => cls.tree.foreach(indexer.index))
                 val document: Document = indexer.result()
+                defined ++= indexer.definedSymbols
+                indexer.referencedSymbols.foreach { case (symbol, sym) =>
+                  referenced.getOrElseUpdate(symbol, sym)
+                }
                 if (document.getOccurrencesCount > 0) {
                   val shard: Path =
                     ScipShardPaths.shardPathForRelativeSource(targetRoot, Path.of(relativePath))
@@ -127,7 +133,44 @@ object TastyToScip {
       }
     }
 
+    writeExternalSymbols(targetRoot, defined.toSet, referenced.toList, warnings)
     written
+  }
+
+  /** Describes the referenced symbols that no indexed source defines.
+    *
+    * Scoped to what the sources actually reference, rather than everything the dependency
+    * jars contain. Describing whole jars would be enormous -- scala-library alone has tens
+    * of thousands of public symbols -- and almost none of it would ever be looked at. What
+    * a reader needs is the signature of the library symbol under the cursor, and that is
+    * exactly this set.
+    *
+    * Written as one shard rather than per-source, because an external symbol belongs to no
+    * document. `ScipWriter.emitTyped` concatenates `Index` messages, so a chunk carrying
+    * only `external_symbols` composes with the per-document ones.
+    */
+  private def writeExternalSymbols(
+    targetRoot: Path,
+    defined: Set[String],
+    referenced: List[(String, Symbol)],
+    warnings: mutable.ListBuffer[String],
+  )(using Context, JavaOrderLookup): Unit = {
+    val external: List[SymbolInformation] = referenced.collect {
+      case (symbol, sym) if !defined.contains(symbol) =>
+        scala.util.Try(TastyDescriber.describe(sym, symbol, sym.name.toString)).toOption
+    }.flatten
+
+    if (external.nonEmpty) {
+      val shard: Path = targetRoot
+        .resolve(ScipShardPaths.SCIP_ROOT)
+        .resolve("external-symbols-tasty.scip")
+      try {
+        Files.createDirectories(shard.getParent)
+        ScipShardWriter.writeExternalSymbols(shard, external.asJava)
+      } catch {
+        case e: IOException => warnings += s"failed to write external symbols: $e"
+      }
+    }
   }
 
   /** Top-level classes grouped by the source file their tree came from.

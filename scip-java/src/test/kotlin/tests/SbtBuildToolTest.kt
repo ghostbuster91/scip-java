@@ -52,9 +52,11 @@ class SbtBuildToolTest : BuildToolHarness() {
             checkBuild(
                 "scala",
                 fixture = "sbt/scala",
-                // One shard from TASTy for the Scala source, one from the javac
-                // plugin for the Java source.
-                expectedScipFiles = 2,
+                // One shard from TASTy for the Scala source, one from the javac plugin for
+                // the Java source, and one holding the external symbols TASTy described --
+                // the library definitions the sources reference, which belong to no
+                // document and so cannot live in a per-source shard.
+                expectedScipFiles = 3,
                 requiresCommand = "sbt",
                 // The count alone cannot distinguish the two Scala front-ends: if TASTy wrote
                 // nothing, SemanticDB would cover the same source and the count would be
@@ -74,6 +76,10 @@ class SbtBuildToolTest : BuildToolHarness() {
                 // cross-built project is indexed here.
                 "cross-version",
                 fixture = "sbt/cross-version",
+                // Only the cross-built project's own shard. No external-symbols shard here:
+                // this fixture is a bare `class Both` that references nothing outside itself,
+                // and that shard is written only when something external is actually
+                // referenced. Contrast the `scala` case, which calls into the JDK.
                 expectedScipFiles = 1,
                 requiresCommand = "sbt",
                 extraArguments = listOf("--", "scipCompileAll 3.3.9"),

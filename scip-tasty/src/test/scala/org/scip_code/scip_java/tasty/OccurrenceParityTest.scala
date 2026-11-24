@@ -139,6 +139,9 @@ object OccurrenceParityTest {
 
   private lazy val targetRoot: Path = Files.createTempDirectory("scip-tasty-shards")
 
+  /** Exposed so [[ExternalSymbolsTest]] can read the same shards without converting twice. */
+  def targetRootForTests: Path = targetRoot
+
   lazy val expected: Set[OccurrenceParity.Key] =
     OccurrenceParity.fromSemanticdb(compiled.semanticdb)
 

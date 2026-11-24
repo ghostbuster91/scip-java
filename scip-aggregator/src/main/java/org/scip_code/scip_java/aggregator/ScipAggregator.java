@@ -135,11 +135,52 @@ public class ScipAggregator {
 
   private void processShard(
       Path shardPath, SymbolRewriter rewriter, Map<String, List<String>> inverseReferences) {
-    for (Document shard : readShard(shardPath)) {
-      Document rewritten = rewriteDocument(shard, rewriter, inverseReferences);
-      writer.emitTyped(Index.newBuilder().addDocuments(rewritten).build());
-      options.reporter().processedOneItem();
+    for (Index shard : readShard(shardPath)) {
+      for (Document document : shard.getDocumentsList()) {
+        Document rewritten = rewriteDocument(document, rewriter, inverseReferences);
+        writer.emitTyped(Index.newBuilder().addDocuments(rewritten).build());
+        options.reporter().processedOneItem();
+      }
+      // A shard carrying external symbols describes definitions outside the indexed sources,
+      // so it has no documents and no occurrences. Their symbols still need qualifying: they
+      // are bare descriptors, and the package table resolves each to the dependency it came
+      // from by classfile path, exactly as it does for a symbol referenced from Java.
+      List<SymbolInformation> external = rewriteExternalSymbols(shard, rewriter);
+      if (!external.isEmpty()) {
+        writer.emitTyped(Index.newBuilder().addAllExternalSymbols(external).build());
+      }
     }
+  }
+
+  private List<SymbolInformation> rewriteExternalSymbols(Index shard, SymbolRewriter rewriter) {
+    List<SymbolInformation> result = new ArrayList<>();
+    for (SymbolInformation info : shard.getExternalSymbolsList()) {
+      SymbolInformation.Builder rebuilt =
+          SymbolInformation.newBuilder(info).setSymbol(rewriter.rewrite(info.getSymbol()));
+      if (!info.getEnclosingSymbol().isEmpty()) {
+        rebuilt.setEnclosingSymbol(rewriter.rewrite(info.getEnclosingSymbol()));
+      }
+      rebuilt.clearRelationships();
+      for (Relationship rel : info.getRelationshipsList()) {
+        rebuilt.addRelationships(
+            Relationship.newBuilder(rel).setSymbol(rewriter.rewrite(rel.getSymbol())));
+      }
+      result.add(rebuilt.build());
+    }
+    return result;
+  }
+
+  /**
+   * Every {@link SymbolInformation} carried by the documents of {@code index}.
+   *
+   * <p>External symbols are deliberately excluded: they describe definitions outside the indexed
+   * sources, so an override relationship on one would make "find references" on a dependency
+   * method list implementors it has no way to know about.
+   */
+  private static List<SymbolInformation> documentSymbols(Index index) {
+    List<SymbolInformation> result = new ArrayList<>();
+    for (Document document : index.getDocumentsList()) result.addAll(document.getSymbolsList());
+    return result;
   }
 
   private Document rewriteDocument(
@@ -213,8 +254,8 @@ public class ScipAggregator {
     if (!options.emitInverseRelationships()) return Collections.emptyMap();
     Map<String, List<String>> result = new HashMap<>();
     for (Path shard : shards) {
-      for (Document doc : readShard(shard)) {
-        for (SymbolInformation info : doc.getSymbolsList()) {
+      for (Index index : readShard(shard)) {
+        for (SymbolInformation info : documentSymbols(index)) {
           if (!supportsReferenceRelationship(info)) continue;
           if (info.getSymbol().isEmpty() || ScipSymbols.isLocal(info.getSymbol())) continue;
           for (Relationship rel : info.getRelationshipsList()) {
@@ -246,10 +287,14 @@ public class ScipAggregator {
     return options.parallel() ? shards.parallelStream() : shards.stream();
   }
 
-  private Collection<Document> readShard(Path shardPath) {
+  /**
+   * Reads a shard as whole {@link Index} messages rather than just their documents, so that a
+   * shard carrying only {@code external_symbols} is not silently dropped.
+   */
+  private Collection<Index> readShard(Path shardPath) {
     try {
       if (JAR_PATTERN.matches(shardPath)) return readShardsFromJar(shardPath);
-      return Index.parseFrom(parseFromBytes(Files.readAllBytes(shardPath))).getDocumentsList();
+      return List.of(Index.parseFrom(parseFromBytes(Files.readAllBytes(shardPath))));
     } catch (IOException e) {
       options.reporter().error("invalid SCIP shard: " + shardPath);
       options.reporter().error(e);
@@ -257,15 +302,15 @@ public class ScipAggregator {
     }
   }
 
-  private Collection<Document> readShardsFromJar(Path jarFile) throws IOException {
-    List<Document> result = new ArrayList<>();
+  private Collection<Index> readShardsFromJar(Path jarFile) throws IOException {
+    List<Index> result = new ArrayList<>();
     try (JarFile jar = new JarFile(jarFile.toFile())) {
       Enumeration<JarEntry> entries = jar.entries();
       while (entries.hasMoreElements()) {
         JarEntry entry = entries.nextElement();
         if (!entry.getName().endsWith(".scip")) continue;
         byte[] bytes = InputStreamBytes.readAll(jar.getInputStream(entry));
-        result.addAll(Index.parseFrom(parseFromBytes(bytes)).getDocumentsList());
+        result.add(Index.parseFrom(parseFromBytes(bytes)));
       }
     }
     return result;

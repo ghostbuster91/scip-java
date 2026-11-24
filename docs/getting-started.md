@@ -255,6 +255,19 @@ Scala 2 is not a supported target. Those projects emit no TASTy at all, so they
 fall back to SemanticDB via the `semanticdb-scalac` compiler plugin that sbt wires
 up, but nothing about it is tested.
 
+#### Dependency symbols
+
+TASTy ships inside every published Scala 3 artifact, so `scip-java` can describe the
+library definitions your sources reference even though those libraries were never
+indexed themselves — hovering a call to a dependency shows its signature. This is
+not possible from SemanticDB, which is never published inside a jar.
+
+Only the symbols your sources actually reference are described, not everything the
+dependency jars contain: the latter would add tens of thousands of entries from
+`scala-library` alone, almost none of which would ever be read. They are emitted as
+SCIP `external_symbols`, which carry no occurrences because there is no file in this
+repository to point at.
+
 #### What TASTy does not describe
 
 One `scip-java` release reads one range of TASTy versions, and TASTy rejects a
@@ -263,10 +276,13 @@ Scala 3 newer than the release supports therefore stops with a message naming th
 version it found, the version it supports, and the branch to use instead — rather
 than quietly producing an index that describes none of the Scala.
 
-Two kinds of occurrence are missing by construction, because tasty-query does not
-expose them: references to packages, whether in a `package` clause or a qualified
-type name, and `import` statements at the top of a file. Imports inside a class or
-object body are indexed normally.
+Two kinds of occurrence are missing. References to packages — whether in a
+`package` clause or a qualified type name such as `java.lang.StringBuilder` — are
+not emitted. And `import` statements are not indexed: clicking an imported name
+does not navigate. For imports at the top of a file this is a hard limit, because
+tasty-query exposes the enclosing `PackageDef` only through a private API; for
+imports inside a class or object body the trees are reachable and indexing them is
+simply not implemented yet.
 
 #### Cross-built repositories
 
