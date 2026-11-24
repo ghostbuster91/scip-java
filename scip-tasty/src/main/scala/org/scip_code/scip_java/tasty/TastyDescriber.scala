@@ -19,17 +19,21 @@ object TastyDescriber {
   /** `display_name` is load-bearing, not cosmetic: `SemanticdbToScip.addCliqueReferences`
     * compares display names to decide whether to add an `is_reference` relationship.
     */
+  /** Returns a builder rather than a finished message, so a caller can still add the
+    * `is_reference` relationships that tie a definition clique together -- those are only
+    * known once a whole document has been walked.
+    */
   def describe(sym: Symbol, symbol: String, displayName: String)(using
     Context,
     JavaOrderLookup,
-  ): SymbolInformation = {
+  ): SymbolInformation.Builder = {
     val info = SymbolInformation.newBuilder().setSymbol(symbol).setDisplayName(displayName)
     kindOf(sym).foreach(info.setKind)
     signatureOf(sym).foreach { text =>
       info.setSignatureDocumentation(Signature.newBuilder().setLanguage("scala").setText(text))
     }
     overrides(sym).foreach(info.addRelationships)
-    info.build()
+    info
   }
 
   /** Every method overrides something on `Object`; both `SemanticdbToScip` and

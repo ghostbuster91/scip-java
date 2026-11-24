@@ -2,7 +2,7 @@ package org.scip_code.scip_java.tasty
 
 import scala.collection.mutable
 
-import org.scip_code.scip.{Document, Occurrence, SymbolRole}
+import org.scip_code.scip.{Document, Occurrence, Relationship, SymbolRole}
 import org.scip_code.scip_java.shared.{ScipDocumentBuilder, ScipRange, ScipSymbols}
 import tastyquery.Contexts.Context
 import tastyquery.SourcePosition
@@ -30,9 +30,23 @@ final class TastyDocumentIndexer(
 
   private val lines: LineIndex = LineIndex.of(text)
   private val builder: ScipDocumentBuilder = new ScipDocumentBuilder()
-  private val describedSymbols = mutable.HashSet.empty[String]
   private val defined = mutable.HashSet.empty[String]
   private val referenced = mutable.HashMap.empty[String, Symbol]
+
+  /** Symbol descriptions, built only once the whole document has been walked.
+    *
+    * Deferred because a description carries the `is_reference` relationships of its
+    * definition clique, and a clique is not known until every definition has been seen.
+    */
+  private val descriptions = mutable.LinkedHashMap.empty[String, (Symbol, String)]
+
+  /** Symbols sharing one definition offset -- dotty's `symsAtOffset`.
+    *
+    * A case class, its companion's `apply` and its `copy` are all positioned on the class
+    * name, and a `var`'s field, getter and setter all on the `var`. Grouping by offset is
+    * what recovers those sets; see [[cliqueRelationships]] for what is done with them.
+    */
+  private val symbolsAtOffset = mutable.LinkedHashMap.empty[Int, mutable.LinkedHashSet[String]]
 
   /** Local ids, bucketed the way dotty buckets them.
     *
@@ -45,7 +59,20 @@ final class TastyDocumentIndexer(
   private val localIds = mutable.HashMap.empty[(Int, String), Int]
   private var nextLocalId: Int = 0
 
-  def result(): Document = builder.build("scala", relativePath, text)
+  def result(): Document = {
+    // Descriptions are emitted here, not as each definition is met, because every one of
+    // them carries the `is_reference` relationships of its clique and those depend on the
+    // whole document having been walked.
+    descriptions.foreach { case (symbol, (sym, name)) =>
+      val info = TastyDescriber.describe(sym, symbol, name)
+      cliqueRelationships(symbol, name).foreach(info.addRelationships)
+      // Only locals carry this, matching the SemanticDB path: it is what lets a reader tell
+      // which method a `local 4` belongs to, since the id itself says nothing.
+      if (ScipSymbols.isLocal(symbol)) enclosingGlobalSymbol(sym).foreach(info.setEnclosingSymbol)
+      builder.addSymbol(info.build())
+    }
+    builder.build("scala", relativePath, text)
+  }
 
   /** Global symbols this document defines. */
   def definedSymbols: Set[String] = defined.toSet
@@ -69,6 +96,14 @@ final class TastyDocumentIndexer(
       // loses every reference in it.
       val generated: Boolean = tree match {
         case dd: DefDef if isGeneratedMember(dd.symbol) =>
+          describeWithoutOccurrence(dd, dd.symbol, sourceName(dd.symbol))
+          dd.symbol.paramSymss.foreach {
+            case Left(termParams) =>
+              termParams.foreach(p =>
+                p.tree.foreach(t => describeWithoutOccurrence(t, p, p.name.toString))
+              )
+            case Right(_) => ()
+          }
           traverse(dd.rhs)
           true
         case _ => false
@@ -122,10 +157,26 @@ final class TastyDocumentIndexer(
           emit(symbol, range, Occurrence.newBuilder().setSymbolRoles(SymbolRole.Definition_VALUE))
           defined += symbol
           describe(sym, symbol, name)
+          recordAtOffset(tree.pos.startOffset, symbol)
         }
       }
     }
   }
+
+  /** Describes a definition and records its offset, without claiming an occurrence.
+    *
+    * This is the shape the compiler's extractor uses for a generated member: `copy`,
+    * `apply` and `unapply` get `SymbolInformation` so that hovering them shows something,
+    * but no definition occurrence, because the range they would claim belongs to the class
+    * name. Registering the offset is what later ties them to the class as a clique.
+    */
+  private def describeWithoutOccurrence(tree: DefTree, sym: Symbol, name: String): Unit =
+    if (!tree.pos.isUnknown && tree.pos.sourceFile.path == pickledPath) {
+      TastySymbols.globalSymbol(sym).foreach { symbol =>
+        describe(sym, symbol, name)
+        recordAtOffset(tree.pos.startOffset, symbol)
+      }
+    }
 
   private def reference(pos: SourcePosition, sym: Symbol): Unit = {
     val name: String = sym.name.toString
@@ -160,7 +211,45 @@ final class TastyDocumentIndexer(
     }
 
   private def describe(sym: Symbol, symbol: String, name: String): Unit =
-    if (describedSymbols.add(symbol)) builder.addSymbol(TastyDescriber.describe(sym, symbol, name))
+    descriptions.getOrElseUpdate(symbol, (sym, name))
+
+  /** The nearest enclosing symbol that is global, if any.
+    *
+    * `SymbolInformation.enclosing_symbol` is passed through `SymbolRewriter.rewrite` by the
+    * aggregator, so it has to be a bare descriptor like any other symbol here.
+    */
+  private def enclosingGlobalSymbol(sym: Symbol): Option[String] = {
+    def loop(current: Symbol): Option[String] =
+      current.owner match {
+        case null  => None
+        case owner => TastySymbols.globalSymbol(owner).orElse(loop(owner))
+      }
+    loop(sym)
+  }
+
+  /** Records that `symbol` is defined at `offset`, for clique grouping. */
+  private def recordAtOffset(offset: Int, symbol: String): Unit =
+    symbolsAtOffset.getOrElseUpdate(offset, mutable.LinkedHashSet.empty) += symbol
+
+  /** `is_reference` relationships tying `symbol` to the rest of its definition clique.
+    *
+    * A clique is the set of symbols sharing one definition occurrence -- a case class, its
+    * companion's `apply`, its `copy`. Without these, "find references" on one of them misses
+    * the occurrences attributed to the others, because only one of them owns the range.
+    *
+    * The filter mirrors `SemanticdbToScip.addCliqueReferences`: relate another member only
+    * when it is an `apply` or shares this symbol's display name. That is what keeps a
+    * case class's `copy` tied to the class while leaving unrelated members that merely
+    * happen to start at the same offset alone.
+    */
+  private def cliqueRelationships(symbol: String, displayName: String): List[Relationship] =
+    symbolsAtOffset.values.toList.filter(_.contains(symbol)).flatMap { clique =>
+      clique.toList.filter(_ != symbol).filter { other =>
+        other.endsWith(".apply().") || descriptions.get(other).exists(_._2 == displayName)
+      }
+    }.distinct.map(other =>
+      Relationship.newBuilder().setSymbol(other).setIsReference(true).build()
+    )
 
   /** The range covering just the identifier.
     *

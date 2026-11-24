@@ -155,9 +155,13 @@ object TastyToScip {
     referenced: List[(String, Symbol)],
     warnings: mutable.ListBuffer[String],
   )(using Context, JavaOrderLookup): Unit = {
+    // No clique relationships here: a clique ties together symbols sharing one definition
+    // occurrence, and an external symbol has no occurrence in this repository at all.
     val external: List[SymbolInformation] = referenced.collect {
       case (symbol, sym) if !defined.contains(symbol) =>
-        scala.util.Try(TastyDescriber.describe(sym, symbol, sym.name.toString)).toOption
+        scala.util
+          .Try(TastyDescriber.describe(sym, symbol, sym.name.toString).build())
+          .toOption
     }.flatten
 
     if (external.nonEmpty) {
