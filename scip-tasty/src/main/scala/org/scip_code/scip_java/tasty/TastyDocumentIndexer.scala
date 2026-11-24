@@ -145,23 +145,29 @@ final class TastyDocumentIndexer(
   private def typeSymbol(tree: TypeTree): Option[Symbol] =
     scala.util.Try(tree.toType).toOption.collect { case tr: TypeRef => tr.optSymbol }.flatten
 
-  private def definition(tree: DefTree, sym: Symbol, name: String): Unit = {
-    // An auto-generated companion -- the one an `enum` or `case class` gets for free --
-    // sits at the same position as the class itself. Emitting it would put both `Color#`
-    // and `Color.` on the name `Color`, where the compiler emits only the class.
-    val skip: Boolean =
-      TastyExclusions.excludeDefinition(tree) || TastyExclusions.isGeneratedCompanion(sym)
-    if (!skip) {
-      nameRange(tree.pos, name).foreach { range =>
-        symbolFor(sym, tree.pos, name).foreach { symbol =>
-          emit(symbol, range, Occurrence.newBuilder().setSymbolRoles(SymbolRole.Definition_VALUE))
-          defined += symbol
-          describe(sym, symbol, name)
-          recordAtOffset(tree.pos.startOffset, symbol)
-        }
+  private def definition(tree: DefTree, sym: Symbol, name: String): Unit =
+    if (!TastyExclusions.excludeDefinition(tree)) {
+      // An auto-generated companion -- the one an `enum` or `case class` gets for free --
+      // sits at the same position as the class itself, so it must not claim an occurrence:
+      // that would put both `Color#` and `Color.` on the name `Color`, where the compiler
+      // emits only the class. It is still described, because it is a real symbol and the
+      // class names it as part of its clique.
+      val mayOwnRange: Boolean = !TastyExclusions.isGeneratedCompanion(sym)
+      nameRange(tree.pos, name).filter(_ => mayOwnRange) match {
+        case Some(range) =>
+          symbolFor(sym, tree.pos, name).foreach { symbol =>
+            emit(symbol, range, Occurrence.newBuilder().setSymbolRoles(SymbolRole.Definition_VALUE))
+            defined += symbol
+            describe(sym, symbol, displayNameOf(sym, name))
+            recordAtOffset(tree.pos.startOffset, symbol)
+          }
+        case None =>
+          // No range to claim: the name is not written at this position. A constructor, a
+          // module class, a setter, a `given` -- all real symbols that the compiler
+          // describes without an occurrence, and all of them clique members.
+          describeWithoutOccurrence(tree, sym, name)
       }
     }
-  }
 
   /** Describes a definition and records its offset, without claiming an occurrence.
     *
@@ -173,7 +179,7 @@ final class TastyDocumentIndexer(
   private def describeWithoutOccurrence(tree: DefTree, sym: Symbol, name: String): Unit =
     if (!tree.pos.isUnknown && tree.pos.sourceFile.path == pickledPath) {
       TastySymbols.globalSymbol(sym).foreach { symbol =>
-        describe(sym, symbol, name)
+        describe(sym, symbol, displayNameOf(sym, name))
         recordAtOffset(tree.pos.startOffset, symbol)
       }
     }
@@ -243,13 +249,15 @@ final class TastyDocumentIndexer(
     * happen to start at the same offset alone.
     */
   private def cliqueRelationships(symbol: String, displayName: String): List[Relationship] =
-    symbolsAtOffset.values.toList.filter(_.contains(symbol)).flatMap { clique =>
-      clique.toList.filter(_ != symbol).filter { other =>
-        other.endsWith(".apply().") || descriptions.get(other).exists(_._2 == displayName)
+    symbolsAtOffset.values.toList
+      .filter(_.contains(symbol))
+      .flatMap { clique =>
+        clique.toList.filter(_ != symbol).filter { other =>
+          other.endsWith(".apply().") || descriptions.get(other).exists(_._2 == displayName)
+        }
       }
-    }.distinct.map(other =>
-      Relationship.newBuilder().setSymbol(other).setIsReference(true).build()
-    )
+      .distinct
+      .map(other => Relationship.newBuilder().setSymbol(other).setIsReference(true).build())
 
   /** The range covering just the identifier.
     *
@@ -293,6 +301,26 @@ final class TastyDocumentIndexer(
     */
   private def isGeneratedMember(sym: TermSymbol): Boolean =
     sym.isSynthetic && sym.owner.isInstanceOf[ClassSymbol]
+
+  /** The name a client shows for `sym`, which is not always the name matched in source.
+    *
+    * A file's top-level definitions are wrapped in a synthetic `Foo$package` module, which
+    * the compiler reports as a package object named after its *package* -- `example`, not
+    * `Fixture$package`. The two names have to stay separate: matching "example" against the
+    * source text would find it in the `package com.example` clause and wrongly claim a range
+    * there.
+    */
+  private def displayNameOf(sym: Symbol, matched: String): String =
+    if (isPackageWrapper(sym)) Option(sym.owner).map(_.name.toString).getOrElse(matched)
+    else matched
+
+  /** The synthetic module a file's top-level definitions live in.
+    *
+    * The module class is named `Foo$package$` and the module value `Foo$package`, so the
+    * trailing object marker comes off before the test.
+    */
+  private def isPackageWrapper(sym: Symbol): Boolean =
+    sym.name.toString.stripSuffix("$").endsWith("$package")
 
   /** The name as it is written in source.
     *

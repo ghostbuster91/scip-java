@@ -65,7 +65,9 @@ class DefinitionCliqueTest {
   def cliquesDoNotRelateUnrelatedNames(): Unit = {
     val offenders: List[String] = symbols.flatMap { info =>
       info.getRelationshipsList.asScala
-        .filter(_.getIsReference)
+        // An override is also marked as a reference, and legitimately points at a name in a
+        // supertype -- `Object#hashCode` -- so it is not a clique member.
+        .filter(r => r.getIsReference && !r.getIsImplementation)
         .map(_.getSymbol)
         .filter(other => !other.endsWith(".apply().") && !sameName(info.getSymbol, other))
         .map(other => s"${info.getSymbol} -> $other")

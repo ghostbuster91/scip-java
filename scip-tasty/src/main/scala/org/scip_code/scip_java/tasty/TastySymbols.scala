@@ -110,7 +110,7 @@ object TastySymbols {
   /** dotty's `sym.is(Param)`. tasty-query has no such predicate, so it is recovered from
     * the owning method's parameter lists.
     */
-  private def isParam(sym: Symbol)(using Context): Boolean =
+  def isParam(sym: Symbol)(using Context): Boolean =
     sym.owner match {
       case owner: TermSymbol if owner.isMethod =>
         owner.paramSymss.exists {
