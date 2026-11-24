@@ -276,13 +276,18 @@ Scala 3 newer than the release supports therefore stops with a message naming th
 version it found, the version it supports, and the branch to use instead — rather
 than quietly producing an index that describes none of the Scala.
 
-Two kinds of occurrence are missing. References to packages — whether in a
-`package` clause or a qualified type name such as `java.lang.StringBuilder` — are
-not emitted. And `import` statements are not indexed: clicking an imported name
-does not navigate. For imports at the top of a file this is a hard limit, because
-tasty-query exposes the enclosing `PackageDef` only through a private API; for
-imports inside a class or object body the trees are reachable and indexing them is
-simply not implemented yet.
+`import` statements are not indexed: clicking an imported name does not navigate.
+For imports at the top of a file this is a hard limit, because tasty-query exposes
+the enclosing `PackageDef` only through a private API; for imports inside a class or
+object body the trees are reachable and indexing them is simply not implemented yet.
+
+The package named in a `package` clause is not indexed either, for the same reason —
+the clause lives in that same unreachable `PackageDef`. A package named in a
+qualified type, as in `new java.lang.StringBuilder`, *is* indexed.
+
+A constructor declared without a parameter list — `class Overloads:` rather than
+`case class Greeting(..)` — carries no source span in TASTy, so it gets no
+definition occurrence. One written with parameters does.
 
 #### Cross-built repositories
 

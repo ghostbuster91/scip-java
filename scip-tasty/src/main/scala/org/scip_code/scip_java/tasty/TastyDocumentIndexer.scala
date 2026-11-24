@@ -9,7 +9,7 @@ import tastyquery.SourcePosition
 import tastyquery.Symbols.*
 import tastyquery.Traversers
 import tastyquery.Trees.*
-import tastyquery.Types.TypeRef
+import tastyquery.Types.{PackageRef, TermRef, TypeRef}
 
 /** Turns the TASTy trees of a single source file into SCIP occurrences.
   *
@@ -129,6 +129,10 @@ final class TastyDocumentIndexer(
           case ref: TermReferenceTree => resolved(ref).foreach(reference(ref.pos, _))
           case ti: TypeIdent          => typeSymbol(ti).foreach(reference(ti.pos, _))
           case st: SelectTypeTree     => typeSymbol(st).foreach(reference(st.pos, _))
+          // The package part of a qualified type name -- the `lang` of
+          // `new java.lang.StringBuilder`. It is a `TypeTree` rather than a
+          // `TermReferenceTree`, so it needs its own case or the prefix goes unindexed.
+          case trt: TermRefTypeTree   => prefixSymbol(trt).foreach(reference(trt.pos, _))
           case _                      => ()
         }
         super.traverse(tree)
@@ -144,6 +148,15 @@ final class TastyDocumentIndexer(
 
   private def typeSymbol(tree: TypeTree): Option[Symbol] =
     scala.util.Try(tree.toType).toOption.collect { case tr: TypeRef => tr.optSymbol }.flatten
+
+  /** The symbol a type-position *prefix* refers to, which is usually a package. */
+  private def prefixSymbol(tree: TypeTree): Option[Symbol] =
+    scala.util.Try(tree.toPrefix).toOption.flatMap {
+      case p: PackageRef => scala.util.Try(p.symbol).toOption
+      case t: TermRef    => scala.util.Try(t.symbol).toOption
+      case tr: TypeRef   => tr.optSymbol
+      case _             => None
+    }
 
   private def definition(tree: DefTree, sym: Symbol, name: String): Unit =
     if (!TastyExclusions.excludeDefinition(tree)) {
@@ -166,6 +179,33 @@ final class TastyDocumentIndexer(
           // module class, a setter, a `given` -- all real symbols that the compiler
           // describes without an occurrence, and all of them clique members.
           describeWithoutOccurrence(tree, sym, name)
+          if (TastyExclusions.isConstructor(sym)) constructorMarker(tree, sym)
+      }
+    }
+
+  /** A zero-width definition occurrence for a constructor, at the end of the class name.
+    *
+    * `<init>` is never written in source, so there is no name to anchor a range to -- but
+    * without *some* definition occurrence, a `new Greeting(...)` reference resolves to a
+    * symbol that nothing in the index defines, and "go to definition" on it leads nowhere.
+    * The compiler solves this the same way, emitting a marker where the class name ends.
+    */
+  private def constructorMarker(tree: DefTree, ctor: Symbol): Unit =
+    if (!tree.pos.isUnknown && tree.pos.sourceFile.path == pickledPath) {
+      TastySymbols.globalSymbol(ctor).foreach { symbol =>
+        // The constructor's own span start, which is where the compiler puts its marker.
+        // That is the start of the parameter list for `case class Greeting(..)` and the
+        // start of the body for a `class Overloads:` that declares none -- so deriving it
+        // from the class *name* instead gets the second case wrong.
+        val offset: Int = tree.pos.startOffset
+        val line: Int = lines.lineOf(offset)
+        val column: Int = lines.columnOf(offset)
+        emit(
+          symbol,
+          ScipRange.singleLine(line, column, column),
+          Occurrence.newBuilder().setSymbolRoles(SymbolRole.Definition_VALUE),
+        )
+        defined += symbol
       }
     }
 
