@@ -14,9 +14,13 @@ maven-plugin-api = "3.10.1"
 maven-project = "2.2.1"
 protobuf = "4.34.2"
 protobuf-plugin = "0.10.1"
+scala3 = "3.10.0"
 scip-bindings = "0.10.0"
 shadow = "9.6.1"
 spotless = "8.11.0"
+# tasty-query 1.10.0 reads TASTy major 28 / minor 10, i.e. Scala 3.0 through 3.10. A newer
+# minor is rejected outright, so this version and `scala3` above move together.
+tasty-query = "1.10.0"
 vanniktech-maven-publish = "0.37.0"
 
 [libraries]
@@ -43,8 +47,10 @@ lombok = { module = "org.projectlombok:lombok", version.ref = "lombok" }
 maven-plugin-annotations = { module = "org.apache.maven.plugin-tools:maven-plugin-annotations", version.ref = "maven-plugin-annotations" }
 maven-plugin-api = { module = "org.apache.maven:maven-plugin-api", version.ref = "maven-plugin-api" }
 maven-project = { module = "org.apache.maven:maven-project", version.ref = "maven-project" }
+scala3-compiler = { module = "org.scala-lang:scala3-compiler_3", version.ref = "scala3" }
 scip-java-bindings = { module = "org.scip-code:scip-java-bindings", version.ref = "scip-bindings" }
 scip-kotlin-bindings = { module = "org.scip-code:scip-kotlin-bindings", version.ref = "scip-bindings" }
+tasty-query = { module = "ch.epfl.scala:tasty-query_3", version.ref = "tasty-query" }
 
 [plugins]
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }

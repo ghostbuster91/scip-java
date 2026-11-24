@@ -30,6 +30,7 @@ include(
     "scip-kotlin-analysis",
     "scip-aggregator",
     "scip-semanticdb",
+    "scip-tasty",
     "scip-maven-plugin",
     "scip-gradle-plugin",
     "scip-java",
