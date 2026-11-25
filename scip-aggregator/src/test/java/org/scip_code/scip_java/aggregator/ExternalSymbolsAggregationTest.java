@@ -48,8 +48,7 @@ class ExternalSymbolsAggregationTest {
     // Unqualified here because the fixture declares no packages, so the package table cannot
     // attribute the symbol to a dependency. What matters is that it survived aggregation.
     assertTrue(
-        external.get(0).getSymbol().endsWith("java/lang/Math#max()."),
-        external.get(0).getSymbol());
+        external.get(0).getSymbol().endsWith("java/lang/Math#max()."), external.get(0).getSymbol());
   }
 
   private List<SymbolInformation> aggregate(Path tmp, Path targetroot) throws IOException {

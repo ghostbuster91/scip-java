@@ -174,8 +174,8 @@ public class ScipAggregator {
    * Every {@link SymbolInformation} carried by the documents of {@code index}.
    *
    * <p>External symbols are deliberately excluded: they describe definitions outside the indexed
-   * sources, so an override relationship on one would make "find references" on a dependency
-   * method list implementors it has no way to know about.
+   * sources, so an override relationship on one would make "find references" on a dependency method
+   * list implementors it has no way to know about.
    */
   private static List<SymbolInformation> documentSymbols(Index index) {
     List<SymbolInformation> result = new ArrayList<>();
@@ -288,8 +288,8 @@ public class ScipAggregator {
   }
 
   /**
-   * Reads a shard as whole {@link Index} messages rather than just their documents, so that a
-   * shard carrying only {@code external_symbols} is not silently dropped.
+   * Reads a shard as whole {@link Index} messages rather than just their documents, so that a shard
+   * carrying only {@code external_symbols} is not silently dropped.
    */
   private Collection<Index> readShard(Path shardPath) {
     try {

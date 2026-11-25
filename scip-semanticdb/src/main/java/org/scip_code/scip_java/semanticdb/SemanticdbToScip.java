@@ -62,14 +62,16 @@ public final class SemanticdbToScip {
 
   private final Path sourceroot;
   private final Path targetroot;
+
   /**
-   * Source paths another front-end already wrote a shard for, source-root-relative and
-   * unix-style, as {@link ScipShardPaths#relativePath} spells them.
+   * Source paths another front-end already wrote a shard for, source-root-relative and unix-style,
+   * as {@link ScipShardPaths#relativePath} spells them.
    *
    * <p>A shard path is derived from the source path alone, so two front-ends converting the same
    * source would silently overwrite each other and the index would describe a mixture of the two.
    */
   private Set<String> alreadyCovered = Set.of();
+
   private final List<String> warnings = new ArrayList<>();
   private final List<String> unformattableSignatures = new ArrayList<>();
   private final Set<String> unparseableSymbols = new LinkedHashSet<>();

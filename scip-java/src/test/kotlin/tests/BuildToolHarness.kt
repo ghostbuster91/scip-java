@@ -119,8 +119,8 @@ abstract class BuildToolHarness {
         /**
          * Substrings the run's output must contain.
          *
-         * Shard counts alone cannot tell which front-end produced a shard, so a case that cares
-         * has to assert on what the run reported.
+         * Shard counts alone cannot tell which front-end produced a shard, so a case that cares has
+         * to assert on what the run reported.
          */
         expectedOutputContains: List<String> = emptyList(),
         runs: Int = 1,
