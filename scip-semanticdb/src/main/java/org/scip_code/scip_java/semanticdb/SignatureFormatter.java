@@ -19,8 +19,10 @@ public class SignatureFormatter {
 
   private static final Type OBJECT_TYPE_REF = typeRef("java/lang/Object#");
   private static final Type PRODUCT_TYPE_REF = typeRef("scala/Product#");
-  private static final Type SCALA_SERIALIZABLE_TYPE_REF = typeRef("scala/package.Serializable#");
-  private static final Type JAVA_SERIALIZABLE_TYPE_REF = typeRef("java/util/Serializable#");
+  private static final Type SCALA_PACKAGE_SERIALIZABLE_TYPE_REF =
+      typeRef("scala/package.Serializable#");
+  private static final Type SCALA_SERIALIZABLE_TYPE_REF = typeRef("scala/Serializable#");
+  private static final Type JAVA_SERIALIZABLE_TYPE_REF = typeRef("java/io/Serializable#");
   private static final Type SCALA_ANY_TYPE_REF = typeRef("scala/Any#");
   private static final Type SCALA_ANYREF_TYPE_REF = typeRef("scala/AnyRef#");
 
@@ -34,18 +36,14 @@ public class SignatureFormatter {
   private static final String ARRAY_SYMBOL = "scala/Array#";
   private static final String ENUM_SYMBOL = "java/lang/Enum#";
   private static final String ANNOTATION_SYMBOL = "java/lang/annotation/Annotation#";
-  private static final Set<Type> REDUNDANT_CLASS_PARENTS = new HashSet<>();
-  private static final Set<Type> CASE_CLASS_PARENTS = new HashSet<>();
-
-  {
-    REDUNDANT_CLASS_PARENTS.add(OBJECT_TYPE_REF);
-    REDUNDANT_CLASS_PARENTS.add(SCALA_ANY_TYPE_REF);
-    REDUNDANT_CLASS_PARENTS.add(SCALA_ANYREF_TYPE_REF);
-
-    CASE_CLASS_PARENTS.add(PRODUCT_TYPE_REF);
-    CASE_CLASS_PARENTS.add(SCALA_SERIALIZABLE_TYPE_REF);
-    CASE_CLASS_PARENTS.add(JAVA_SERIALIZABLE_TYPE_REF);
-  }
+  private static final Set<Type> REDUNDANT_CLASS_PARENTS =
+      Set.of(OBJECT_TYPE_REF, SCALA_ANY_TYPE_REF, SCALA_ANYREF_TYPE_REF);
+  private static final Set<Type> CASE_CLASS_PARENTS =
+      Set.of(
+          PRODUCT_TYPE_REF,
+          SCALA_PACKAGE_SERIALIZABLE_TYPE_REF,
+          SCALA_SERIALIZABLE_TYPE_REF,
+          JAVA_SERIALIZABLE_TYPE_REF);
 
   private final StringBuilder s = new StringBuilder();
   private final SymbolInformation symbolInformation;
@@ -149,7 +147,7 @@ public class SignatureFormatter {
         classSignature.getParentsList().stream()
             .filter(parent -> !REDUNDANT_CLASS_PARENTS.contains(parent))
             .filter(parent -> !parent.getTypeRef().getSymbol().equals(ENUM_SYMBOL))
-            .filter(parent -> isCaseClass && !CASE_CLASS_PARENTS.contains(parent))
+            .filter(parent -> !isCaseClass || !CASE_CLASS_PARENTS.contains(parent))
             .filter(parent -> !parent.getTypeRef().getSymbol().equals(ANNOTATION_SYMBOL))
             .collect(Collectors.toList());
 
@@ -603,8 +601,8 @@ public class SignatureFormatter {
           && typeRef.getTypeArgumentsCount() > 0
           && !typeRef.getSymbol().startsWith(FUNCTION_OBJECT)) {
         int n = typeRef.getTypeArgumentsCount() - 1;
-        if (n == 0) {
-          // Special-case for Function1[A, B]: don't wrap `A`  in parenthesis like this `(A) => B`
+        if (n == 1) {
+          // Special-case for Function1[A, B]: don't wrap `A` in parenthesis like this `(A) => B`
           b.append(formatType(typeRef.getTypeArguments(0)));
         } else {
           b.append(
@@ -650,7 +648,7 @@ public class SignatureFormatter {
               .collect(Collectors.joining(isScala ? " with " : " & ")));
     } else if (type.hasUnionType()) {
       b.append(
-          type.getIntersectionType().getTypesList().stream()
+          type.getUnionType().getTypesList().stream()
               .map(this::formatType)
               .collect(Collectors.joining(" | ")));
     } else if (type.hasStructuralType()) {

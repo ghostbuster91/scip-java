@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
 import org.scip_code.scip_java.semanticdb.Semanticdb.AnnotationTree;
+import org.scip_code.scip_java.semanticdb.Semanticdb.ClassSignature;
 import org.scip_code.scip_java.semanticdb.Semanticdb.Constant;
 import org.scip_code.scip_java.semanticdb.Semanticdb.ExistentialType;
 import org.scip_code.scip_java.semanticdb.Semanticdb.IntConstant;
@@ -12,20 +13,20 @@ import org.scip_code.scip_java.semanticdb.Semanticdb.Language;
 import org.scip_code.scip_java.semanticdb.Semanticdb.LiteralTree;
 import org.scip_code.scip_java.semanticdb.Semanticdb.Signature;
 import org.scip_code.scip_java.semanticdb.Semanticdb.SymbolInformation;
+import org.scip_code.scip_java.semanticdb.Semanticdb.SymbolInformation.Kind;
+import org.scip_code.scip_java.semanticdb.Semanticdb.SymbolInformation.Property;
 import org.scip_code.scip_java.semanticdb.Semanticdb.TextDocument;
 import org.scip_code.scip_java.semanticdb.Semanticdb.Tree;
 import org.scip_code.scip_java.semanticdb.Semanticdb.Type;
 import org.scip_code.scip_java.semanticdb.Semanticdb.TypeRef;
 import org.scip_code.scip_java.semanticdb.Semanticdb.UnaryOperator;
 import org.scip_code.scip_java.semanticdb.Semanticdb.UnaryOperatorTree;
+import org.scip_code.scip_java.semanticdb.Semanticdb.UnionType;
 import org.scip_code.scip_java.semanticdb.Semanticdb.ValueSignature;
 
 /**
- * Colocated unit test for {@link SignatureFormatter}, which until now had no coverage at all. Each
- * case below pins down a one-line regression found by reading the code: a stray {@code s} instead
- * of {@code b} that routed a nullary function type's argument into the wrong accumulator, a Scala
- * existential type closing with the wrong bracket, and a unary {@code +} that rendered as {@code
- * -}.
+ * Colocated unit test for {@link SignatureFormatter}, pinning down formatting regressions for
+ * function types, union types, class parents, existential brackets, and unary operators.
  */
 class SignatureFormatterTest {
 
@@ -41,27 +42,92 @@ class SignatureFormatterTest {
     return new SignatureFormatter(info, EMPTY_SYMTAB).formatSymbol();
   }
 
+  private static SymbolInformation scalaValWithType(Type type) {
+    return SymbolInformation.newBuilder()
+        .setSymbol("_empty_/foo.")
+        .setDisplayName("foo")
+        .setLanguage(Language.SCALA)
+        .setSignature(
+            Signature.newBuilder().setValueSignature(ValueSignature.newBuilder().setTpe(type)))
+        .build();
+  }
+
   /**
-   * `formatType`'s nullary-function branch (`scala/Function0[Int]`, i.e. `=> Int`) used to append
-   * its argument into the formatter's whole-signature field instead of the local accumulator the
-   * branch is building -- invisible in the branch's own return value, and spliced into the
-   * signature one call too early, swallowing the space before {@code =>}.
+   * `Function0[Int]` is `() => Int`, `Function1[String, Int]` is `String => Int` (no parens around
+   * the single parameter), and `Function2[String, Boolean, Int]` is `(String, Boolean) => Int`.
    */
   @Test
-  void formatsANullaryFunctionTypeWithoutLosingASpace() {
-    SymbolInformation info =
+  void formatsScalaFunctionTypesByArity() {
+    assertEquals(
+        "foo: () => Int ",
+        format(scalaValWithType(typeRef("scala/Function0#", typeRef("scala/Int#")))));
+    assertEquals(
+        "foo: String => Int ",
+        format(
+            scalaValWithType(
+                typeRef("scala/Function1#", typeRef("java/lang/String#"), typeRef("scala/Int#")))));
+    assertEquals(
+        "foo: (String, Boolean) => Int ",
+        format(
+            scalaValWithType(
+                typeRef(
+                    "scala/Function2#",
+                    typeRef("java/lang/String#"),
+                    typeRef("scala/Boolean#"),
+                    typeRef("scala/Int#")))));
+  }
+
+  /** Scala 3 union types must read from `getUnionType()`, not `getIntersectionType()`. */
+  @Test
+  void formatsScalaUnionTypes() {
+    Type union =
+        Type.newBuilder()
+            .setUnionType(
+                UnionType.newBuilder()
+                    .addTypes(typeRef("scala/Int#"))
+                    .addTypes(typeRef("java/lang/String#")))
+            .build();
+
+    assertEquals("foo: Int | String ", format(scalaValWithType(union)));
+  }
+
+  /**
+   * Non-case classes keep their explicit parents; case classes drop only synthetic
+   * Product/Serializable.
+   */
+  @Test
+  void preservesNonCaseClassParentsAndFiltersSyntheticCaseClassParents() {
+    SymbolInformation plainClass =
         SymbolInformation.newBuilder()
-            .setSymbol("_empty_/foo.")
-            .setDisplayName("foo")
+            .setSymbol("com/example/Sub#")
+            .setDisplayName("Sub")
+            .setKind(Kind.CLASS)
             .setLanguage(Language.SCALA)
             .setSignature(
                 Signature.newBuilder()
-                    .setValueSignature(
-                        ValueSignature.newBuilder()
-                            .setTpe(typeRef("scala/Function0#", typeRef("scala/Int#")))))
+                    .setClassSignature(
+                        ClassSignature.newBuilder().addParents(typeRef("com/example/Base#"))))
             .build();
 
-    assertEquals("foo: Int => Int ", format(info));
+    assertEquals("class Sub extends Base", format(plainClass));
+
+    SymbolInformation caseClass =
+        SymbolInformation.newBuilder()
+            .setSymbol("com/example/Point#")
+            .setDisplayName("Point")
+            .setKind(Kind.CLASS)
+            .setProperties(Property.CASE_VALUE)
+            .setLanguage(Language.SCALA)
+            .setSignature(
+                Signature.newBuilder()
+                    .setClassSignature(
+                        ClassSignature.newBuilder()
+                            .addParents(typeRef("com/example/Base#"))
+                            .addParents(typeRef("scala/Product#"))
+                            .addParents(typeRef("scala/Serializable#"))))
+            .build();
+
+    assertEquals("case class Point extends Base", format(caseClass));
   }
 
   /** A Scala existential type argument list must close with `]`, not re-open with `[`. */
