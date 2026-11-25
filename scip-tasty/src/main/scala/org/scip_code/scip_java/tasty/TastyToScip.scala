@@ -14,6 +14,7 @@ import org.scip_code.scip_java.shared.{ScipShardPaths, ScipShardWriter}
 import tastyquery.Classpaths.{Classpath, ClasspathEntry}
 import tastyquery.Contexts
 import tastyquery.Contexts.Context
+import tastyquery.Exceptions.MemberNotFoundException
 import tastyquery.Symbols.*
 import tastyquery.jdk.ClasspathLoaders
 
@@ -185,7 +186,7 @@ object TastyToScip {
     val external: List[SymbolInformation] = referenced.collect {
       case (symbol, sym) if !defined.contains(symbol) =>
         scala.util
-          .Try(TastyDescriber.describe(sym, symbol, sym.name.toString).build())
+          .Try(TastyDescriber.describe(sym, symbol, TastyDescriber.displayNameOf(sym)).build())
           .toOption
     }.flatten
 
@@ -223,58 +224,57 @@ object TastyToScip {
     // `UnknownClasspathEntry` for it rather than returning nothing. Skipped silently: a
     // project with no test sources is entirely normal and not worth a warning.
     for (entry <- projectEntries if entry.listAllPackages().nonEmpty) {
-      eachRoot(entry, warnings).foreach {
-        case cls: ClassSymbol =>
-          try
-            cls.tree.foreach { tree =>
-              val path: String = tree.pos.sourceFile.path
-              if (path.nonEmpty) grouped.getOrElseUpdate(path, mutable.ListBuffer.empty) += cls
-            }
-          catch {
-            case NonFatal(e) =>
-              // A TASTy version mismatch surfaces here, lazily, rather than from
-              // `ClasspathLoaders.read`. Report it against the class, not the run.
-              warnings += s"failed to read the tree of ${cls.displayFullName}: $e"
+      eachRoot(entry, warnings).foreach { cls =>
+        try
+          cls.tree.foreach { tree =>
+            val path: String = tree.pos.sourceFile.path
+            if (path.nonEmpty) grouped.getOrElseUpdate(path, mutable.ListBuffer.empty) += cls
           }
-        case _ => ()
+        catch {
+          case NonFatal(e) =>
+            // A TASTy version mismatch surfaces here, lazily, rather than from
+            // `ClasspathLoaders.read`. Report it against the class, not the run.
+            warnings += s"failed to read the tree of ${cls.displayFullName}: $e"
+        }
       }
     }
     grouped.view.mapValues(_.toList).toList
   }
 
-  /** The roots of one classpath entry, yielding what it can and warning about the rest.
+  /** The top-level TASTy classes of one classpath entry, isolating failures to one class.
     *
-    * Pulled one at a time rather than with `.toList`, because the `Iterable` is lazy and
-    * reading a root can throw: tasty-query hits an `assert` on some classes. Forcing the
-    * whole enumeration makes one unreadable class cost every source in that module --
-    * indexing tapir lost about 80 files that way, three bad test classes at a time.
+    * Looks up each `.tasty` file individually via `entry.listAllPackages()` rather than
+    * iterating `findSymbolsByClasspathEntry(entry)`: the latter shares one iterator across
+    * the entire entry, so a single `AssertionError` from tasty-query aborts enumeration and
+    * loses every remaining class in that module. Looking up each `ClassData` with a `.tasty`
+    * file independently keeps every sibling class intact and names the failing class in the
+    * warning.
     */
   private def eachRoot(
     entry: ClasspathEntry,
     warnings: mutable.ListBuffer[String],
-  )(using Context): List[TermOrTypeSymbol] = {
-    val iterator =
-      try summon[Context].findSymbolsByClasspathEntry(entry).iterator
-      catch {
-        case NonFatal(e) =>
-          warnings += s"failed to enumerate $entry: $e"
-          Iterator.empty
-      }
-    val roots = List.newBuilder[TermOrTypeSymbol]
-    var running = true
-    while (running) {
-      try if (iterator.hasNext) roots += iterator.next() else running = false
-      catch {
-        case NonFatal(e) =>
-          // Everything gathered before the failure is kept; the rest of this entry is given
-          // up, because a thrown iterator cannot be safely resumed. That is still far
-          // better than `.toList`, which discarded the whole entry on any failure. The
-          // class cannot be named -- it is the one being read -- so the entry is.
-          warnings += s"failed to read a class in $entry: $e"
-          running = false
-      }
+  )(using Context): List[ClassSymbol] = {
+    val ctx: Context = summon[Context]
+    val roots = mutable.LinkedHashSet.empty[ClassSymbol]
+    for {
+      pkg <- entry.listAllPackages()
+      cd <- pkg.listAllClassDatas() if cd.hasTastyFile
+    } {
+      val baseName: String = cd.binaryName.stripSuffix("$")
+      val fullName: String =
+        if (pkg.dotSeparatedName.isEmpty) baseName
+        else s"${pkg.dotSeparatedName}.$baseName"
+      def lookup(find: String => ClassSymbol): Unit =
+        try roots += find(fullName)
+        catch {
+          case _: MemberNotFoundException => ()
+          case NonFatal(e) =>
+            warnings += s"failed to read $fullName: $e"
+        }
+      lookup(ctx.findTopLevelClass)
+      lookup(ctx.findTopLevelModuleClass)
     }
-    roots.result()
+    roots.toList
   }
 
   /** The source-root-relative path for a path as pickled into TASTy, if it is under the root.

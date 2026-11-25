@@ -87,7 +87,7 @@ object TastySymbols {
     * sym.is(Package) || !sym.isSelfSym && (sym.is(Param) || sym.owner.isClass) && sym.owner.isGlobal
     * }}}
     */
-  private def isGlobal(sym: Symbol)(using Context): Boolean =
+  def isGlobal(sym: Symbol)(using Context): Boolean =
     sym match {
       case _: PackageSymbol => true
       case _ =>
@@ -108,7 +108,7 @@ object TastySymbols {
     sym.isInstanceOf[ClassSymbol] || sym.isInstanceOf[PackageSymbol]
 
   /** dotty's `sym.is(Param)`. tasty-query has no such predicate, so it is recovered from
-    * the owning method's parameter lists.
+    * the owning method's parameter lists or type member ownership.
     */
   def isParam(sym: Symbol)(using Context): Boolean =
     sym.owner match {
@@ -117,7 +117,10 @@ object TastySymbols {
           case Left(termParams)  => termParams.exists(_ eq sym)
           case Right(typeParams) => typeParams.exists(_ eq sym)
         }
-      case _ => false
+      // Type parameters of type aliases / abstract types (`type Box[A] = List[A]`) are
+      // owned by the `TypeMemberSymbol`, not a class or method.
+      case _: TypeMemberSymbol => sym.isInstanceOf[TypeParamSymbol]
+      case _                   => false
     }
 
   /** The module class name without its trailing `$`, e.g. `Math$` -> `Math`. */

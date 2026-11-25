@@ -117,7 +117,9 @@ object ParityHarness {
             addParams(dd.symbol)
           case vd: ValDef     => add(vd.symbol)
           case tm: TypeMember => add(tm.symbol)
-          case _              => ()
+          case tp: TypeParam if !TastyExclusions.isConstructor(tp.symbol.owner) =>
+            add(tp.symbol)
+          case _ => ()
         }
         super.traverse(tree)
       }

@@ -44,8 +44,9 @@ object OverloadDisambiguator {
       order <- summon[JavaOrderLookup].order
       // `staticsFirst` mirrors dotty's `JavaModule` case, which concatenates the statics
       // holder's declarations ahead of the companion class's.
-      rows <- order.sameNamed(cls, sym.name.toString, staticsFirst = isStaticsHolder(cls))
-      idx = indexOfJava(sym, rows)
+      symIsStatic = isStaticsHolder(cls)
+      rows <- order.sameNamed(cls, sym.name.toString, staticsFirst = symIsStatic)
+      idx = indexOfJava(sym, symIsStatic, rows)
       if idx >= 0
     } yield if (idx == 0) "" else "+" + idx
     resolved.getOrElse("")
@@ -54,20 +55,22 @@ object OverloadDisambiguator {
   /** Position of `sym` among the same-named classfile rows, or -1 if not identifiable.
     *
     * tasty-query offers no link from a `TermSymbol` back to its `methods[]` row, so the
-    * row is identified by its **erased parameter types**, which uniquely distinguish
-    * overloads within a class. Both sides spell them the same way: `Signature.paramsSig`
-    * yields erased names and [[JvmDescriptor]] decodes the descriptor into that same
-    * spelling -- including that a primitive erases to `scala.Int`, not `int`.
+    * row is identified by its **erased parameter types** and staticness, which uniquely
+    * distinguish overloads within a class. Both sides spell them the same way:
+    * `Signature.paramsSig` yields erased names and [[JvmDescriptor]] decodes the descriptor
+    * into that same spelling -- including that a primitive erases to `scala.Int`, not `int`.
     *
     * `ParamSig.TypeLen` entries are dropped: they record a type-parameter count, which a
     * JVM descriptor does not carry.
     */
-  private def indexOfJava(sym: TermSymbol, rows: Vector[JavaMethodOrderMethod])(using
-    Context
-  ): Int =
+  private def indexOfJava(
+    sym: TermSymbol,
+    isStatic: Boolean,
+    rows: Vector[JavaMethodOrderMethod],
+  )(using Context): Int =
     erasedParams(sym) match {
       case None         => -1
-      case Some(params) => rows.indexWhere(_.paramTypes == params)
+      case Some(params) => rows.indexWhere(r => r.isStatic == isStatic && r.paramTypes == params)
     }
 
   /** `sym.signature` throws when tasty-query cannot erase the type, which it cannot do at
@@ -82,9 +85,10 @@ object OverloadDisambiguator {
     cls.isModuleClass && cls.sourceLanguage == SourceLanguage.Java
 
   private def suffix(sym: TermSymbol, alts: List[TermSymbol])(using Context): String = {
-    val sig: Signatures.Signature = sym.signature
+    val sig: Option[Signatures.Signature] = scala.util.Try(sym.signature).toOption
     val target: Names.UnsignedTermName = sym.targetName
-    def matches(c: TermSymbol): Boolean = c.signature == sig && c.targetName == target
+    def matches(c: TermSymbol): Boolean =
+      (c eq sym) || (c.targetName == target && sig.isDefined && scala.util.Try(c.signature).toOption == sig)
     alts match {
       // dotty: if the head already matches, no suffix is appended at all. Otherwise the
       // suffix counts from the *tail*, plus one -- so first => "", second => "+1".

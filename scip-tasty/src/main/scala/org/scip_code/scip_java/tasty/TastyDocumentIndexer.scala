@@ -47,6 +47,7 @@ final class TastyDocumentIndexer(
     * what recovers those sets; see [[cliqueRelationships]] for what is done with them.
     */
   private val symbolsAtOffset = mutable.LinkedHashMap.empty[Int, mutable.LinkedHashSet[String]]
+  private val offsetsOfSymbol = mutable.HashMap.empty[String, mutable.LinkedHashSet[Int]]
 
   /** Local ids, bucketed the way dotty buckets them.
     *
@@ -297,14 +298,16 @@ final class TastyDocumentIndexer(
         // start of the body for a `class Overloads:` that declares none -- so deriving it
         // from the class *name* instead gets the second case wrong.
         val offset: Int = tree.pos.startOffset
-        val line: Int = lines.lineOf(offset)
-        val column: Int = lines.columnOf(offset)
-        emit(
-          symbol,
-          ScipRange.singleLine(line, column, column),
-          Occurrence.newBuilder().setSymbolRoles(SymbolRole.Definition_VALUE),
-        )
-        defined += symbol
+        if (lines.contains(offset)) {
+          val line: Int = lines.lineOf(offset)
+          val column: Int = lines.columnOf(offset)
+          emit(
+            symbol,
+            ScipRange.singleLine(line, column, column),
+            Occurrence.newBuilder().setSymbolRoles(SymbolRole.Definition_VALUE),
+          )
+          defined += symbol
+        }
       }
     }
 
@@ -403,8 +406,10 @@ final class TastyDocumentIndexer(
   }
 
   /** Records that `symbol` is defined at `offset`, for clique grouping. */
-  private def recordAtOffset(offset: Int, symbol: String): Unit =
+  private def recordAtOffset(offset: Int, symbol: String): Unit = {
     symbolsAtOffset.getOrElseUpdate(offset, mutable.LinkedHashSet.empty) += symbol
+    offsetsOfSymbol.getOrElseUpdate(symbol, mutable.LinkedHashSet.empty) += offset
+  }
 
   /** `is_reference` relationships tying `symbol` to the rest of its definition clique.
     *
@@ -418,12 +423,13 @@ final class TastyDocumentIndexer(
     * happen to start at the same offset alone.
     */
   private def cliqueRelationships(symbol: String, displayName: String): List[Relationship] =
-    symbolsAtOffset.values.toList
-      .filter(_.contains(symbol))
-      .flatMap { clique =>
-        clique.toList.filter(_ != symbol).filter { other =>
-          other.endsWith(".apply().") || descriptions.get(other).exists(_._2 == displayName)
-        }
+    offsetsOfSymbol
+      .get(symbol)
+      .toList
+      .flatMap(_.iterator.flatMap(offset => symbolsAtOffset.getOrElse(offset, Nil)))
+      .filter(_ != symbol)
+      .filter { other =>
+        other.endsWith(".apply().") || descriptions.get(other).exists(_._2 == displayName)
       }
       .distinct
       .map(other => Relationship.newBuilder().setSymbol(other).setIsReference(true).build())
@@ -490,38 +496,9 @@ final class TastyDocumentIndexer(
   private def isGeneratedMember(sym: TermSymbol): Boolean =
     sym.isSynthetic && sym.owner.isInstanceOf[ClassSymbol]
 
-  /** The name a client shows for `sym`, which is not always the name matched in source.
-    *
-    * A file's top-level definitions are wrapped in a synthetic `Foo$package` module, which
-    * the compiler reports as a package object named after its *package* -- `example`, not
-    * `Fixture$package`. The two names have to stay separate: matching "example" against the
-    * source text would find it in the `package com.example` clause and wrongly claim a range
-    * there.
-    */
   private def displayNameOf(sym: Symbol, matched: String): String =
-    if (isPackageWrapper(sym)) Option(sym.owner).map(_.name.toString).getOrElse(matched)
-    else matched
+    TastyDescriber.displayNameOf(sym, matched)
 
-  /** The synthetic module a file's top-level definitions live in.
-    *
-    * The module class is named `Foo$package$` and the module value `Foo$package`, so the
-    * trailing object marker comes off before the test.
-    */
-  private def isPackageWrapper(sym: Symbol): Boolean =
-    sym.name.toString.stripSuffix("$").endsWith("$package")
-
-  /** The name as it is written in source.
-    *
-    * A module class is pickled as `Foo$`, which never appears in source; the name to look
-    * for is the module value's. Without this every `object` loses its definition occurrence.
-    */
   private def sourceName(sym: Symbol): String =
-    sym match {
-      case cls: ClassSymbol if cls.isModuleClass =>
-        cls.moduleValue.map(_.name.toString).getOrElse {
-          val n: String = cls.name.toString
-          if (n.endsWith("$")) n.dropRight(1) else n
-        }
-      case _ => sym.name.toString
-    }
+    TastyDescriber.sourceName(sym)
 }

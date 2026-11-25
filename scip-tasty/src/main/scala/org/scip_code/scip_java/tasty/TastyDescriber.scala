@@ -6,7 +6,6 @@ import tastyquery.Modifiers.TermSymbolKind
 import tastyquery.SourceLanguage
 import tastyquery.Symbols.*
 import tastyquery.Symbols.TypeMemberDefinition
-import tastyquery.Trees.DefDef
 
 /** Builds the `SymbolInformation` that describes a symbol: its kind, its signature and what
   * it overrides.
@@ -33,11 +32,60 @@ object TastyDescriber {
     val info = SymbolInformation.newBuilder().setSymbol(symbol).setDisplayName(displayName)
     kindOf(sym).foreach(info.setKind)
     signatureOf(sym).foreach { text =>
-      info.setSignatureDocumentation(Signature.newBuilder().setLanguage("scala").setText(text))
+      info.setSignatureDocumentation(
+        Signature.newBuilder().setLanguage(languageOf(sym)).setText(text)
+      )
     }
     overrides(sym).foreach(info.addRelationships)
     info
   }
+
+  /** The name a client shows for `sym`, stripping synthetic module `$` and mapping a file's
+    * synthetic `Foo$package` wrapper to its package name.
+    */
+  def displayNameOf(sym: Symbol)(using Context): String =
+    displayNameOf(sym, sourceName(sym))
+
+  /** The name a client shows for `sym` given the name matched in source.
+    *
+    * A file's top-level definitions are wrapped in a synthetic `Foo$package` module, which
+    * the compiler reports as a package object named after its *package* -- `example`, not
+    * `Fixture$package`. The two names have to stay separate: matching "example" against the
+    * source text would find it in the `package com.example` clause and wrongly claim a range
+    * there.
+    */
+  def displayNameOf(sym: Symbol, matched: String)(using Context): String =
+    if (isPackageWrapper(sym)) Option(sym.owner).map(_.name.toString).getOrElse(matched)
+    else matched
+
+  /** The synthetic module a file's top-level definitions live in.
+    *
+    * The module class is named `Foo$package$` and the module value `Foo$package`, so the
+    * trailing object marker comes off before the test.
+    */
+  def isPackageWrapper(sym: Symbol): Boolean =
+    sym.name.toString.stripSuffix("$").endsWith("$package")
+
+  /** The name as it is written in source.
+    *
+    * A module class is pickled as `Foo$`, which never appears in source; the name to look
+    * for is the module value's. Without this every `object` loses its definition occurrence.
+    */
+  def sourceName(sym: Symbol)(using Context): String =
+    sym match {
+      case cls: ClassSymbol if cls.isModuleClass =>
+        cls.moduleValue.map(_.name.toString).getOrElse {
+          val n: String = cls.name.toString
+          if (n.endsWith("$")) n.dropRight(1) else n
+        }
+      case _ => sym.name.toString
+    }
+
+  private def languageOf(sym: Symbol)(using Context): String =
+    sym match {
+      case t: TermOrTypeSymbol if t.sourceLanguage == SourceLanguage.Java => "java"
+      case _                                                              => "scala"
+    }
 
   /** `java/lang/Object#` and anything declared in it.
     *
@@ -77,12 +125,13 @@ object TastyDescriber {
     }
 
   /** Mirrors `SemanticdbToScip.supportsReferenceRelationship`: a type-like symbol's
-    * override relationship is not also a reference, or "find references" on a class would
-    * list every subclass as a use of it.
+    * override relationship is not also a reference, or "find references" on a class or trait
+    * would list every subclass as a use of it.
     */
   private def supportsReferenceRelationship(sym: Symbol)(using Context): Boolean =
     kindOf(sym) match {
-      case Some(SymbolInformation.Kind.Interface) | Some(SymbolInformation.Kind.Type) |
+      case Some(SymbolInformation.Kind.Interface) | Some(SymbolInformation.Kind.Trait) |
+          Some(SymbolInformation.Kind.Enum) | Some(SymbolInformation.Kind.Type) |
           Some(SymbolInformation.Kind.Class) | Some(SymbolInformation.Kind.Object) |
           Some(SymbolInformation.Kind.PackageObject) =>
         false
@@ -105,7 +154,7 @@ object TastyDescriber {
           t.typeDef match {
             case TypeMemberDefinition.TypeAlias(alias)          => s"= ${alias.showBasic}"
             case TypeMemberDefinition.AbstractType(bounds)      => bounds.showBasic
-            case TypeMemberDefinition.OpaqueTypeAlias(_, alias) => s">= ${alias.showBasic}"
+            case TypeMemberDefinition.OpaqueTypeAlias(_, alias) => s"= ${alias.showBasic}"
           }
         // A class shows what it extends. `Object` and `Matchable` are dropped: every class
         // has them, so listing them is noise in a hover rather than information.
@@ -143,17 +192,9 @@ object TastyDescriber {
         else Some(SymbolInformation.Kind.Class)
       case _: TypeParamSymbol => Some(SymbolInformation.Kind.TypeParameter)
       case _: TypeSymbol      => Some(SymbolInformation.Kind.Type)
-      case t: TermSymbol  => Some(termKind(t))
+      case t: TermSymbol      => Some(termKind(t))
       case _: PackageSymbol   => Some(SymbolInformation.Kind.Package)
     }
-
-  /** The synthetic module a file's top-level definitions live in.
-    *
-    * The module class is named `Foo$package$` and the module value `Foo$package`, so the
-    * trailing object marker comes off before the test.
-    */
-  private def isPackageWrapper(sym: Symbol): Boolean =
-    sym.name.toString.stripSuffix("$").endsWith("$package")
 
   private def termKind(t: TermSymbol)(using Context): SymbolInformation.Kind =
     if (TastySymbols.isParam(t)) SymbolInformation.Kind.Parameter
@@ -164,25 +205,21 @@ object TastyDescriber {
     // An enum case compiles to a static member of the enum class, which is what the
     // compiler reports as `METHOD | STATIC`.
     else if (t.isEnumCase) SymbolInformation.Kind.StaticMethod
-    else if (t.sourceLanguage == SourceLanguage.Java && t.kind != TermSymbolKind.Def)
-      SymbolInformation.Kind.Field
-    else if (isAbstract(t)) SymbolInformation.Kind.AbstractMethod
+    else if (t.sourceLanguage == SourceLanguage.Java)
+      if (t.kind != TermSymbolKind.Def)
+        if (isJavaStatic(t)) SymbolInformation.Kind.StaticField else SymbolInformation.Kind.Field
+      else if (isJavaStatic(t)) SymbolInformation.Kind.StaticMethod
+      else if (t.isAbstractMember) SymbolInformation.Kind.AbstractMethod
+      else SymbolInformation.Kind.Method
+    else if (!TastySymbols.isGlobal(t) && t.kind != TermSymbolKind.Def)
+      SymbolInformation.Kind.Variable
+    else if (t.isAbstractMember) SymbolInformation.Kind.AbstractMethod
     else SymbolInformation.Kind.Method
 
-  /** A member declared with no right-hand side, as in a trait's `def show(a: A): String`.
-    *
-    * Read off the tree, since tasty-query does not expose the `Deferred` flag. A symbol with
-    * no tree -- a Java or Scala 2 one -- is treated as concrete, which is the safer default:
-    * calling a concrete method abstract would wrongly mark it as needing an implementation.
-    *
-    * Only a `DefDef` counts. A case class's parameter accessor is a `ValDef` with no
-    * right-hand side, because its value arrives from the constructor rather than from an
-    * initializer -- it is not abstract, and treating it so disagreed with the compiler on
-    * `Greeting#name`, `#times` and `Custom#hex`.
-    */
-  private def isAbstract(t: TermSymbol)(using Context): Boolean =
-    t.tree.exists {
-      case dd: DefDef => dd.rhs.isEmpty
-      case _          => false
+  /** A Java class's statics live in its synthetic module class (`JavaModule`). */
+  private def isJavaStatic(t: TermSymbol)(using Context): Boolean =
+    t.owner match {
+      case cls: ClassSymbol => cls.isModuleClass && cls.sourceLanguage == SourceLanguage.Java
+      case _                => false
     }
 }

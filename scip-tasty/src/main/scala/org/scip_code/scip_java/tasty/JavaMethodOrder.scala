@@ -2,7 +2,7 @@ package org.scip_code.scip_java.tasty
 
 import scala.collection.mutable
 
-import tastyquery.Classpaths.Classpath
+import tastyquery.Classpaths.{Classpath, PackageData}
 import tastyquery.Contexts.Context
 import tastyquery.Symbols.*
 
@@ -27,6 +27,18 @@ final class JavaMethodOrder(classpath: Classpath) {
 
   private val byBinaryName =
     mutable.HashMap.empty[String, Option[Vector[JavaMethodOrderMethod]]]
+
+  // Pre-indexed once per classpath so each cache miss looks up its package in O(1) instead of
+  // linearly scanning every package of every jar on the classpath.
+  private val packagesByName: Map[String, Vector[PackageData]] = {
+    val acc = mutable.HashMap.empty[String, mutable.Builder[PackageData, Vector[PackageData]]]
+    classpath.foreach { entry =>
+      entry.listAllPackages().foreach { pkg =>
+        acc.getOrElseUpdate(pkg.dotSeparatedName, Vector.newBuilder) += pkg
+      }
+    }
+    acc.view.mapValues(_.result()).toMap
+  }
 
   /** Same-named methods of `cls`, in the order dotty numbers them.
     *
@@ -84,9 +96,9 @@ final class JavaMethodOrder(classpath: Classpath) {
     val (pkg, simple) =
       if (lastDot < 0) ("", binaryName)
       else (binaryName.substring(0, lastDot), binaryName.substring(lastDot + 1))
-    val found = classpath.iterator
-      .flatMap(_.listAllPackages())
-      .filter(_.dotSeparatedName == pkg)
+    val found = packagesByName
+      .getOrElse(pkg, Vector.empty)
+      .iterator
       .flatMap(_.getClassDataByBinaryName(simple))
       .find(_.hasClassFile)
     found.flatMap(data => ClassfileMethods.parse(data.readClassFileBytes()))

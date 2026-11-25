@@ -17,6 +17,7 @@ class Overloads:
   def typed[A](value: A): A = value
 
   type Alias = Int
+  type Box[A] = List[A]
 
   // A backticked identifier naming a reserved word, referenced using the same backticks:
   // the occurrence has to be anchored past the opening quote, at "type" itself.
@@ -56,9 +57,16 @@ enum Color:
 
 trait Show[A]:
   def show(a: A): String
+  val separator: String
 
 object Show:
-  given Show[Int] = (a: Int) => a.toString
+  opaque type Label = String
+  object Label:
+    def apply(s: String): Label = s
+
+  given Show[Int] = new Show[Int]:
+    def show(a: Int): String = a.toString
+    val separator: String = ","
 
   extension (self: Int) def shown(using s: Show[Int]): String = s.show(self)
 
