@@ -24,6 +24,7 @@ val snapshotCaseInputs =
         SnapshotCaseInput("java-common", ":scip-snapshots-java-common"),
         SnapshotCaseInput("java-25", ":scip-snapshots-java-25", minimumJavaFeature = 25),
         SnapshotCaseInput("kotlin-common", ":scip-snapshots-kotlin-common"),
+        SnapshotCaseInput("scala3-common", ":scip-snapshots-scala3-common"),
     )
 
 // The snapshot goldens are produced by compiling the sibling "case" projects with the scip compiler

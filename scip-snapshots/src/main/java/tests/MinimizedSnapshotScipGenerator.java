@@ -28,7 +28,9 @@ public class MinimizedSnapshotScipGenerator {
           new SnapshotCaseSpec("java-common", "scip-snapshots/expected/java/common", false, "17"),
           new SnapshotCaseSpec("java-25", "scip-snapshots/expected/java-25", false, "25"),
           new SnapshotCaseSpec(
-              "kotlin-common", "scip-snapshots/expected/kotlin/common", true, "17"));
+              "kotlin-common", "scip-snapshots/expected/kotlin/common", true, "17"),
+          new SnapshotCaseSpec(
+              "scala3-common", "scip-snapshots/expected/scala3/common", false, "17"));
 
   public static final class SnapshotCase {
     public final String id;
