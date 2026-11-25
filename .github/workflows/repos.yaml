@@ -162,6 +162,17 @@ jobs:
             bazel_version: ""
             covers: Gradle, mixed Java/Kotlin, Java 21 runtime
 
+          - name: sbt-scala3-example-project
+            repository: scala/scala3-example-project
+            ref: 959f68d79cfa0f4b8cd0e29cb80ba8ec87e01915
+            directory: .
+            build_tool: sbt
+            build_command: "compile"
+            java: 21
+            bazel_version: ""
+            expected_language: scala
+            covers: sbt, Scala 3.10, TASTy indexing (enums, given/using, union/intersection types)
+
           - name: bazel-java-examples
             repository: bazelbuild/examples
             ref: dbf3399037ae65f901d46147804749fae1409ef2
@@ -289,7 +300,7 @@ jobs:
             jq -r --arg expected_language "$EXPECTED_LANGUAGE" '
               .documents[]?
               | select((if $expected_language == "" then (.language == "java" or .language == "kotlin") else .language == $expected_language end)
-                  and ((.relative_path // .relativePath // "") | test(if $expected_language == "kotlin" then "\\.kt$" elif $expected_language == "java" then "\\.java$" else "\\.(java|kt)$" end))
+                  and ((.relative_path // .relativePath // "") | test(if $expected_language == "kotlin" then "\\.kt$" elif $expected_language == "java" then "\\.java$" elif $expected_language == "scala" then "\\.scala$" else "\\.(java|kt)$" end))
                   and ((.occurrences // []) | length > 0)
                   and ((.symbols // []) | length > 0))
               | .relative_path // .relativePath

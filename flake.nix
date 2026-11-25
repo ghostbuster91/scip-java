@@ -37,6 +37,7 @@
               nixfmt
               nodejs
               scipCli
+              sbt
               yarn
             ];
           };
