@@ -9,7 +9,7 @@ import tastyquery.SourcePosition
 import tastyquery.Symbols.*
 import tastyquery.Traversers
 import tastyquery.Trees.*
-import tastyquery.Types.{PackageRef, TermRef, TypeRef}
+import tastyquery.Types.{AppliedType, PackageRef, TermRef, TermType, TypeRef}
 
 /** Turns the TASTy trees of a single source file into SCIP occurrences.
   *
@@ -94,7 +94,12 @@ final class TastyDocumentIndexer(
       // where the compiler emits only the constructor's. The right-hand side is a different
       // matter: a `given` is generated but its body is written by hand, and pruning that
       // loses every reference in it.
-      val generated: Boolean = tree match {
+      //
+      // `Import` is also handled without falling through to `super.traverse`: otherwise
+      // `super.traverse` visits `imp.expr` as an ordinary `TermReferenceTree` and emits
+      // package occurrences for `import scala.util.Try` that the compiler does not emit (and
+      // visits non-package qualifiers twice).
+      val handledChildren: Boolean = tree match {
         case dd: DefDef if isGeneratedMember(dd.symbol) =>
           describeWithoutOccurrence(dd, dd.symbol, sourceName(dd.symbol))
           dd.symbol.paramSymss.foreach {
@@ -106,9 +111,12 @@ final class TastyDocumentIndexer(
           }
           traverse(dd.rhs)
           true
+        case imp: Import =>
+          indexImport(imp)
+          true
         case _ => false
       }
-      if (!generated) {
+      if (!handledChildren) {
         tree match {
           case cd: ClassDef =>
             definition(cd, cd.symbol, sourceName(cd.symbol))
@@ -144,27 +152,7 @@ final class TastyDocumentIndexer(
           // `new java.lang.StringBuilder`. It is a `TypeTree` rather than a
           // `TermReferenceTree`, so it needs its own case or the prefix goes unindexed.
           case trt: TermRefTypeTree   => prefixSymbol(trt).foreach(reference(trt.pos, _))
-          // `import foo.{bar => baz}`: `ImportIdent` carries no type of its own (it is not
-          // a `TermReferenceTree`), so the member it names has to be looked up by hand from
-          // the qualifier's declarations. Only the original name (`bar`) is anchored here --
-          // an alias (`baz`) introduces a new local binding rather than referencing one. The
-          // qualifier itself (`foo`) is handled explicitly too: a bare package path gets no
-          // occurrence from the compiler, but a term qualifier like an object does.
-          case imp: Import =>
-            imp.expr match {
-              case ref: TermReferenceTree =>
-                resolved(ref)
-                  .filterNot(_.isInstanceOf[PackageSymbol])
-                  .foreach(reference(ref.pos, _))
-              case _ => ()
-            }
-            imp.selectors.foreach { sel =>
-              if (!sel.isWildcard) {
-                importSelectorSymbols(imp.expr, sel.imported.name.toString)
-                  .foreach(reference(sel.imported.pos, _))
-              }
-            }
-          case _ => ()
+          case _                      => ()
         }
         super.traverse(tree)
       }
@@ -189,25 +177,76 @@ final class TastyDocumentIndexer(
       case _             => None
     }
 
+  /** Indexes an `import foo.{bar => baz}` clause without emitting bare package qualifiers.
+    *
+    * `ImportIdent` carries no type of its own (it is not a `TermReferenceTree`), so the
+    * member it names is resolved from the qualifier's members. Only the original name (`bar`)
+    * is anchored here -- an alias (`baz`) introduces a new local binding rather than
+    * referencing one. Non-package segments of the qualifier (`Greeting` in
+    * `import com.example.Greeting.default`, or a local value in `import g.greet`) are
+    * indexed recursively while package prefixes are skipped.
+    */
+  private def indexImport(imp: Import): Unit = {
+    indexImportQualifier(imp.expr)
+    imp.selectors.foreach { sel =>
+      if (!sel.isWildcard) {
+        importSelectorSymbols(imp.expr, sel.imported.name.toString)
+          .foreach(reference(sel.imported.pos, _))
+      }
+    }
+  }
+
+  private def indexImportQualifier(expr: TermTree): Unit =
+    expr match {
+      case ref: TermReferenceTree =>
+        resolved(ref)
+          .filterNot(_.isInstanceOf[PackageSymbol])
+          .foreach(reference(ref.pos, _))
+        ref match {
+          case Select(qual, _) => indexImportQualifier(qual)
+          case _               => ()
+        }
+      case _ => ()
+    }
+
   /** The symbols an import selector names, found by hand: `ImportIdent` carries no type of
     * its own, unlike every other reference here, so there is no `.symbol` to read off the
-    * tree -- the qualifier's declarations have to be searched by name instead.
+    * tree -- the qualifier's members have to be searched by name instead.
     *
     * More than one symbol can share the selected name -- `Try` is both a class and its
     * companion object's value -- and the compiler describes the import as referencing all
     * of them, not just whichever one a name lookup happens to find first.
     */
   private def importSelectorSymbols(expr: TermTree, name: String): List[Symbol] =
-    declarationsOf(expr).toList.flatten.filter(_.name.toString == name)
+    scala.util.Try(expr.tpe).toOption match {
+      case Some(p: PackageRef) =>
+        scala.util.Try(p.symbol).toOption.toList
+          .flatMap(_.declarations)
+          .filter(_.name.toString == name)
+      case Some(tpe) =>
+        classSymbolOf(tpe).toList.flatMap { c =>
+          scala.util
+            .Try(c.linearization)
+            .getOrElse(List(c))
+            .iterator
+            .map(_.declarations.filter(_.name.toString == name))
+            .find(_.nonEmpty)
+            .getOrElse(Nil)
+        }
+      case None => Nil
+    }
 
-  /** The members declared by what `expr` -- an import clause's qualifier -- evaluates to. */
-  private def declarationsOf(expr: TermTree): Option[List[Symbol]] =
-    scala.util.Try(expr.tpe).toOption.flatMap {
-      case p: PackageRef => scala.util.Try(p.symbol).toOption.map(_.declarations)
+  private def classSymbolOf(tpe: TermType): Option[ClassSymbol] =
+    tpe match {
       case t: TermRef =>
-        scala.util.Try(t.symbol).toOption.flatMap(_.moduleClass.map(_.declarations))
-      case tr: TypeRef => tr.optSymbol.collect { case cls: ClassSymbol => cls.declarations }
-      case _           => None
+        scala.util
+          .Try(t.symbol)
+          .toOption
+          .flatMap(_.moduleClass)
+          .orElse(scala.util.Try(t.widenTermRef).toOption.flatMap(classSymbolOf))
+      case tr: TypeRef    => tr.optSymbol.collect { case cls: ClassSymbol => cls }
+      case at: AppliedType => classSymbolOf(at.tycon)
+      case _              => None
     }
 
   private def definition(tree: DefTree, sym: Symbol, name: String): Unit =
@@ -419,8 +458,12 @@ final class TastyDocumentIndexer(
     val quoted: Boolean = candidate >= 0 && candidate < text.length && text.charAt(candidate) == '`'
     val nameStart: Int = if (quoted) candidate + 1 else candidate
     if (!matchesAt(nameStart, name)) None
-    else if (quoted) Some(rangeOf(candidate, name.length + 2))
-    else Some(rangeOf(candidate, name.length))
+    else if (quoted) {
+      val closeQuote: Int = nameStart + name.length
+      if (closeQuote < text.length && text.charAt(closeQuote) == '`')
+        Some(rangeOf(candidate, name.length + 2))
+      else None
+    } else Some(rangeOf(candidate, name.length))
   }
 
   private def matchesAt(start: Int, name: String): Boolean =

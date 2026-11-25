@@ -38,6 +38,24 @@ class BacktickAndImportParityTest {
     // resolve to both, not just whichever one a name lookup happens to find first.
     val symbols = occurrencesNamed("Try").filterNot(isDefinition).map(_.getSymbol).toSet
     assertEquals(Set("scala/util/Try#", "scala/util/Try."), symbols, symbols.toString)
+    // Package segments in `import scala.util.{Try => Attempt}` must not emit occurrences
+    // (falling through to `super.traverse` used to emit both `scala/` and `scala/util/`).
+    assertEquals(
+      List.empty[Occurrence],
+      occurrencesNamed("util").filter(_.getSymbol == "scala/util/"),
+      "package qualifier in import clause must not emit an occurrence",
+    )
+  }
+
+  @Test
+  def valueImportReferencesTheMemberOfTheImportedValue(): Unit = {
+    // `import g.greet` imports from a method parameter (not a singleton object); both the
+    // import selector and the body reference must resolve to `Greeting#greet().`.
+    val refs = occurrencesNamed("greet").filterNot(isDefinition)
+    assertEquals(2, refs.size, s"expected two references to `greet`: $refs")
+    refs.foreach { ref =>
+      assertTrue(ref.getSymbol.endsWith("Greeting#greet()."), ref.getSymbol)
+    }
   }
 
   private def isDefinition(occ: Occurrence): Boolean =

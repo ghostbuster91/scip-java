@@ -33,10 +33,11 @@ class Overloads:
   // The alias itself (`greetingDefault`) is deliberately left unused here: using it would
   // require matching the *alias* text at its use site against the real symbol's bare name
   // ("default"), a separate, broader gap this does not attempt to close.
-  def useImports(): Greeting = {
+  def useImports(g: Greeting): String = {
     import scala.util.{Try => Attempt}
     import Greeting.{default => greetingDefault}
-    Greeting.default
+    import g.greet
+    Greeting.default.name + greet
   }
 
 case class Greeting(name: String, times: Int):
