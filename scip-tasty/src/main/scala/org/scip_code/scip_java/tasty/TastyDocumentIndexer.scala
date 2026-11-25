@@ -227,7 +227,7 @@ final class TastyDocumentIndexer(
   private def reference(pos: SourcePosition, sym: Symbol): Unit = {
     val name: String = sym.name.toString
     nameRange(pos, name).foreach { range =>
-      symbolFor(sym, pos, name).foreach { symbol =>
+      symbolFor(sym, definitionPos(sym), name).foreach { symbol =>
         emit(symbol, range, Occurrence.newBuilder())
         // Recorded whether or not it turns out to be external; only the caller, which sees
         // every document, knows which referenced symbols are defined nowhere in the sources.
@@ -235,6 +235,15 @@ final class TastyDocumentIndexer(
       }
     }
   }
+
+  /** Where `sym` itself is defined, not where this reference to it occurs.
+    *
+    * `symbolFor` keys a local id on `(definition offset, name)`; a reference must look up
+    * that key the same way `definition` populated it, or every use of a local gets a fresh
+    * id that never matches its definition.
+    */
+  private def definitionPos(sym: Symbol): SourcePosition =
+    sym.tree.map(_.pos).getOrElse(SourcePosition.NoPosition)
 
   private def emit(symbol: String, range: ScipRange, b: Occurrence.Builder): Unit = {
     b.setSymbol(symbol)
