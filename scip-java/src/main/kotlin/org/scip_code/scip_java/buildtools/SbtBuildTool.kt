@@ -95,24 +95,25 @@ class SbtBuildTool(index: IndexCommand) : BuildTool("sbt", index) {
     }
 
     /**
-     * The Scala 3 versions this build compiles against, read back from the coordinates the
-     * injected plugin reported.
+     * The Scala 3 versions this build compiles against, read back from the coordinates the injected
+     * plugin reported.
      *
      * `scala3-library_3` is on the classpath of every Scala 3 project, and its revision is the
-     * Scala version, so no extra reporting is needed to find out whether this build of
-     * scip-java can read the TASTy that was produced.
+     * Scala version, so no extra reporting is needed to find out whether this build of scip-java
+     * can read the TASTy that was produced.
      */
     private fun scalaVersions(): List<String> {
         val targetroot = targetroot()
         if (!Files.isDirectory(targetroot)) return emptyList()
-        return Files.list(targetroot).use { stream ->
-            stream
-                .filter {
-                    Files.isRegularFile(it) &&
-                        it.fileName.toString().endsWith(".dependencies.txt")
-                }
-                .toList()
-        }
+        return Files.list(targetroot)
+            .use { stream ->
+                stream
+                    .filter {
+                        Files.isRegularFile(it) &&
+                            it.fileName.toString().endsWith(".dependencies.txt")
+                    }
+                    .toList()
+            }
             .flatMap { Files.readAllLines(it) }
             .mapNotNull { line ->
                 val fields = line.split("\t")
@@ -127,8 +128,8 @@ class SbtBuildTool(index: IndexCommand) : BuildTool("sbt", index) {
      *
      * The class directories and the compile classpath both come from `*.tasty-roots.txt` and
      * `*.tasty-classpath.txt`, which the injected sbt plugin writes. The classpath is needed
-     * because TASTy leaves the types of most subexpressions implicit, to be reconstructed from
-     * the classpath, so it cannot be read without one.
+     * because TASTy leaves the types of most subexpressions implicit, to be reconstructed from the
+     * classpath, so it cannot be read without one.
      */
     private fun convertTasty(): Set<String> {
         val classDirs =
@@ -142,8 +143,7 @@ class SbtBuildTool(index: IndexCommand) : BuildTool("sbt", index) {
             (readReportedPaths(".tasty-classpath.txt").distinct() - classDirs.toSet()) +
                 jdkClasspath()
 
-        val result =
-            TastyToScip.convert(index.workingDirectory, targetroot(), classDirs, classpath)
+        val result = TastyToScip.convert(index.workingDirectory, targetroot(), classDirs, classpath)
         // Warnings, not errors, for the same reason as SemanticDB: the worst a file this cannot
         // read should cost is its own document, and SemanticDB may well cover it anyway.
         // Accessors on the Scala-defined result are methods, not Kotlin properties.
@@ -162,11 +162,17 @@ class SbtBuildTool(index: IndexCommand) : BuildTool("sbt", index) {
     /**
      * The JRE, which tasty-query requires on the classpath explicitly -- it resolves even
      * `java.lang` through the classpath it is given and has no implicit view of the platform.
+     *
+     * Every module is included, not just `java.base`: a source referencing `java.sql`, `java.xml`,
+     * `java.net.http`, `java.logging` or `java.management` would otherwise fail to resolve against
+     * the classpath tasty-query is given.
      */
-    private fun jdkClasspath(): List<Path> =
-        listOf(
-            FileSystems.getFileSystem(URI.create("jrt:/")).getPath("modules", "java.base")
-        )
+    private fun jdkClasspath(): List<Path> {
+        val modulesRoot = FileSystems.getFileSystem(URI.create("jrt:/")).getPath("modules")
+        return Files.list(modulesRoot).use { stream ->
+            stream.filter { Files.isDirectory(it) }.toList()
+        }
+    }
 
     /** Reads the line-separated paths out of every `*<suffix>` file the sbt plugin wrote. */
     private fun readReportedPaths(suffix: String): List<Path> {

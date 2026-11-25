@@ -200,13 +200,17 @@ object ParityHarness {
     out.result().sorted.distinct
   }
 
-  /** tasty-query requires the JRE to be put on the classpath explicitly. */
-  def jdkPaths: List[Path] =
-    List(
-      java.nio.file.FileSystems
-        .getFileSystem(java.net.URI.create("jrt:/"))
-        .getPath("modules", "java.base")
-    )
+  /** tasty-query requires the JRE to be put on the classpath explicitly, one entry per
+    * module -- matching every module `SbtBuildTool.jdkClasspath` puts on the real classpath,
+    * not just `java.base`.
+    */
+  def jdkPaths: List[Path] = {
+    val modulesRoot =
+      java.nio.file.FileSystems.getFileSystem(java.net.URI.create("jrt:/")).getPath("modules")
+    Using.resource(Files.list(modulesRoot)) { stream =>
+      stream.iterator().asScala.filter(Files.isDirectory(_)).toList
+    }
+  }
 
   private def readClasspath(compiled: Compiled): Classpath =
     ClasspathLoaders.read((compiled.classes :: compiled.classpath) ++ jdkPaths)
