@@ -135,6 +135,7 @@ object OccurrenceParityTest {
       targetRoot,
       List(compiled.classes).asJava,
       (compiled.classpath ++ ParityHarness.jdkPaths).asJava,
+      "",
     )
 
   private lazy val targetRoot: Path = Files.createTempDirectory("scip-tasty-shards")

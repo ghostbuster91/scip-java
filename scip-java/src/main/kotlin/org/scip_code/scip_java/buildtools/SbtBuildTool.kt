@@ -126,37 +126,71 @@ class SbtBuildTool(index: IndexCommand) : BuildTool("sbt", index) {
      * Turns the TASTy the Scala 3 compiler emitted into SCIP shards, and reports which sources it
      * covered so [convertSemanticdb] can leave those alone.
      *
-     * The class directories and the compile classpath both come from `*.tasty-roots.txt` and
-     * `*.tasty-classpath.txt`, which the injected sbt plugin writes. The classpath is needed
-     * because TASTy leaves the types of most subexpressions implicit, to be reconstructed from the
-     * classpath, so it cannot be read without one.
+     * Converted one sbt project at a time, each with its own `tastyProjectKeys()` classpath, rather
+     * than merging every subproject's classpath into one `TastyToScip.convert` call: a merged
+     * classpath holds every subproject's dependency jars at once, which is both wasted peak memory
+     * (`ClasspathLoaders.read` loads every entry eagerly) and a correctness risk -- if two
+     * subprojects depend on different versions of the same library, only one version's classfiles
+     * can occupy one merged classpath, and the other subproject resolves against the wrong one.
      */
     private fun convertTasty(): Set<String> {
-        val classDirs =
-            readReportedPaths(".tasty-roots.txt").filter { Files.isDirectory(it) }.distinct()
-        if (classDirs.isEmpty()) return emptySet()
-        // A project's class directory also appears on every dependent project's classpath, so it
-        // is reported twice. Dropping the duplicates keeps `ClasspathLoaders.read` -- which
-        // loads every entry eagerly into memory -- from holding the same classes twice, and
-        // keeps one directory from being enumerated as both a project and a dependency.
-        val classpath =
-            (readReportedPaths(".tasty-classpath.txt").distinct() - classDirs.toSet()) +
-                jdkClasspath()
+        val keys = tastyProjectKeys()
+        if (keys.isEmpty()) return emptySet()
+        val covered = mutableSetOf<String>()
+        val warnings = mutableListOf<String>()
+        var written = 0
+        for (key in keys) {
+            // The class directories and the compile classpath both come from
+            // `<key>.tasty-roots.txt` and `<key>.tasty-classpath.txt`, which the injected sbt
+            // plugin writes one pair of per project. The classpath is needed because TASTy
+            // leaves the types of most subexpressions implicit, to be reconstructed from the
+            // classpath, so it cannot be read without one.
+            val classDirs =
+                readReportedPath("$key.tasty-roots.txt").filter { Files.isDirectory(it) }.distinct()
+            if (classDirs.isEmpty()) continue
+            // This project's own class directory also appears on its own reported classpath, so
+            // it is reported twice. Dropping the duplicate keeps `ClasspathLoaders.read` -- which
+            // loads every entry eagerly into memory -- from holding the same classes twice, and
+            // keeps the directory from being enumerated as both a project and a dependency.
+            val classpath =
+                (readReportedPath("$key.tasty-classpath.txt").distinct() - classDirs.toSet()) +
+                    jdkClasspath()
 
-        val result = TastyToScip.convert(index.workingDirectory, targetroot(), classDirs, classpath)
+            val result =
+                TastyToScip.convert(index.workingDirectory, targetroot(), classDirs, classpath, key)
+            // Accessors on the Scala-defined result are methods, not Kotlin properties.
+            warnings += result.warnings()
+            written += result.shardsWritten()
+            covered += result.coveredSources()
+        }
         // Warnings, not errors, for the same reason as SemanticDB: the worst a file this cannot
         // read should cost is its own document, and SemanticDB may well cover it anyway.
-        // Accessors on the Scala-defined result are methods, not Kotlin properties.
-        val warnings = result.warnings()
         warnings.take(MAX_REPORTED_WARNINGS).forEach { index.app.warning(it) }
         val unreported = warnings.size - MAX_REPORTED_WARNINGS
         if (unreported > 0) {
             index.app.warning("$unreported more TASTy conversion warning(s) not shown")
         }
-        if (result.shardsWritten() > 0) {
-            index.app.info("indexed ${result.shardsWritten()} Scala 3 source(s) from TASTy")
+        if (written > 0) {
+            index.app.info("indexed $written Scala 3 source(s) from TASTy")
         }
-        return result.coveredSources()
+        return covered
+    }
+
+    /**
+     * One key per sbt project that reported TASTy output, matching `ScipSbtPlugin.write`'s
+     * `<sanitized-projectId>-<hash(baseDir)>` naming.
+     */
+    private fun tastyProjectKeys(): List<String> {
+        val targetroot = targetroot()
+        if (!Files.isDirectory(targetroot)) return emptyList()
+        return Files.list(targetroot).use { stream ->
+            stream
+                .filter {
+                    Files.isRegularFile(it) && it.fileName.toString().endsWith(".tasty-roots.txt")
+                }
+                .map { it.fileName.toString().removeSuffix(".tasty-roots.txt") }
+                .toList()
+        }
     }
 
     /**
@@ -182,11 +216,18 @@ class SbtBuildTool(index: IndexCommand) : BuildTool("sbt", index) {
             stream
                 .filter { Files.isRegularFile(it) && it.fileName.toString().endsWith(suffix) }
                 .toList()
-                .flatMap { file ->
-                    Files.readAllLines(file).filter { it.isNotBlank() }.map { Paths.get(it.trim()) }
-                }
+                .flatMap(::readPathLines)
         }
     }
+
+    /** Reads the line-separated paths out of one specific file the sbt plugin wrote. */
+    private fun readReportedPath(filename: String): List<Path> {
+        val file = targetroot().resolve(filename)
+        return if (Files.isRegularFile(file)) readPathLines(file) else emptyList()
+    }
+
+    private fun readPathLines(file: Path): List<Path> =
+        Files.readAllLines(file).filter { it.isNotBlank() }.map { Paths.get(it.trim()) }
 
     fun targetroot(): Path = index.finalTargetroot(defaultTargetroot)
 

@@ -52,18 +52,33 @@ object TastyToScip {
     * `classpath` must be the full compile classpath, including the JRE: TASTy cannot be
     * made sense of without it. `sourceRoot` is where the paths pickled into TASTy are
     * resolved from, so it must be the `-sourceroot` the project was compiled with.
+    *
+    * `shardDiscriminator` names the external-symbols shard this call writes. A caller
+    * converting one project at a time -- one subproject of a multi-module sbt build, say --
+    * must pass a discriminator unique to that project, or each call's shard overwrites the
+    * last one's.
     */
   def convert(
     sourceRoot: Path,
     targetRoot: Path,
     classDirs: ju.List[Path],
     classpath: ju.List[Path],
+    shardDiscriminator: String,
   ): Result = {
     val warnings = mutable.ListBuffer.empty[String]
     val covered = mutable.LinkedHashSet.empty[String]
 
     val written: Int =
-      try convertInto(sourceRoot, targetRoot, classDirs, classpath, warnings, covered)
+      try
+        convertInto(
+          sourceRoot,
+          targetRoot,
+          classDirs,
+          classpath,
+          shardDiscriminator,
+          warnings,
+          covered,
+        )
       catch {
         // Reading the classpath and initializing the context can both fail -- an unreadable
         // jar, or running out of memory on a very large classpath. Scala indexing failing
@@ -90,6 +105,7 @@ object TastyToScip {
     targetRoot: Path,
     classDirs: ju.List[Path],
     classpath: ju.List[Path],
+    shardDiscriminator: String,
     warnings: mutable.ListBuffer[String],
     covered: mutable.LinkedHashSet[String],
   ): Int = {
@@ -141,7 +157,7 @@ object TastyToScip {
       }
     }
 
-    writeExternalSymbols(targetRoot, defined.toSet, referenced.toList, warnings)
+    writeExternalSymbols(targetRoot, shardDiscriminator, defined.toSet, referenced.toList, warnings)
     written
   }
 
@@ -159,6 +175,7 @@ object TastyToScip {
     */
   private def writeExternalSymbols(
     targetRoot: Path,
+    shardDiscriminator: String,
     defined: Set[String],
     referenced: List[(String, Symbol)],
     warnings: mutable.ListBuffer[String],
@@ -173,9 +190,14 @@ object TastyToScip {
     }.flatten
 
     if (external.nonEmpty) {
+      // Discriminated by project: a caller converting one project per call -- one
+      // subproject of a multi-module sbt build -- would otherwise have each call's shard
+      // overwrite the last one's, silently dropping every earlier project's external
+      // symbols.
+      val suffix: String = if (shardDiscriminator.isEmpty) "" else s"-$shardDiscriminator"
       val shard: Path = targetRoot
         .resolve(ScipShardPaths.SCIP_ROOT)
-        .resolve("external-symbols-tasty.scip")
+        .resolve(s"external-symbols-tasty$suffix.scip")
       try {
         Files.createDirectories(shard.getParent)
         ScipShardWriter.writeExternalSymbols(shard, external.asJava)

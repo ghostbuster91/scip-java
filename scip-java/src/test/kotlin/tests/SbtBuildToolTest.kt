@@ -71,6 +71,25 @@ class SbtBuildToolTest : BuildToolHarness() {
                         .trimMargin(),
             ),
             checkBuild(
+                "multi-scala3",
+                fixture = "sbt/multi-scala3",
+                // One TASTy shard per project's source, plus one external-symbols shard per
+                // project: each references a different JDK type, so a merged TASTy context --
+                // or a shared external-symbols shard name -- would either conflate the two or
+                // silently drop one project's external symbols.
+                expectedScipFiles = 4,
+                requiresCommand = "sbt",
+                expectedPackages =
+                    """
+                    |maven:org.scala-lang:scala-library:2.13.16
+                    |maven:org.scala-lang:scala3-library_3:3.7.4
+                    |maven:org.scip-code:p1_3:1.0-SNAPSHOT
+                    |maven:org.scip-code:p2_3:1.0-SNAPSHOT
+                    |maven:org.scip-code:root_3:1.0-SNAPSHOT
+                    |"""
+                        .trimMargin(),
+            ),
+            checkBuild(
                 // `scipCompileAll <version>` switches to that version and leaves
                 // out the projects that do not declare it, so only the
                 // cross-built project is indexed here.
