@@ -167,7 +167,7 @@ jobs:
             ref: 959f68d79cfa0f4b8cd0e29cb80ba8ec87e01915
             directory: .
             build_tool: sbt
-            build_command: "compile"
+            build_command: ""
             java: 21
             bazel_version: ""
             expected_language: scala
