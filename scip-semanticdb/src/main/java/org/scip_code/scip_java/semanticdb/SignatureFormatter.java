@@ -492,7 +492,7 @@ public class SignatureFormatter {
       case UNARY_MINUS:
         return "-" + formattedValue;
       case UNARY_PLUS:
-        return "-" + formattedValue;
+        return "+" + formattedValue;
       case UNARY_POSTFIX_INCREMENT:
         return formattedValue + "++";
       case UNARY_POSTFIX_DECREMENT:
@@ -605,7 +605,7 @@ public class SignatureFormatter {
         int n = typeRef.getTypeArgumentsCount() - 1;
         if (n == 0) {
           // Special-case for Function1[A, B]: don't wrap `A`  in parenthesis like this `(A) => B`
-          s.append(formatType(typeRef.getTypeArguments(0)));
+          b.append(formatType(typeRef.getTypeArguments(0)));
         } else {
           b.append(
               typeRef.getTypeArgumentsList().stream()
@@ -695,7 +695,7 @@ public class SignatureFormatter {
                     // else for symlink we can use the usual path
                     return formatType(typeArg);
                   })
-              .collect(Collectors.joining(", ", isScala ? "[" : "<", isScala ? "[" : ">")));
+              .collect(Collectors.joining(", ", isScala ? "[" : "<", isScala ? "]" : ">")));
     } else if (type.hasByNameType()) {
       b.append("=> ").append(formatType(type.getByNameType().getTpe()));
     } else if (type.hasRepeatedType()) {
