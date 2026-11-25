@@ -48,17 +48,30 @@ final class JavaMethodOrder(classpath: Classpath) {
   private def methods(cls: ClassSymbol)(using Context): Option[Vector[JavaMethodOrderMethod]] =
     binaryName(cls).flatMap(n => byBinaryName.getOrElseUpdate(n, read(n)))
 
-  /** `java.lang.Math` for the symbol of `java.lang.Math`, dropping any module-class `$`. */
+  /** `java.util.Map$Entry` for the symbol of `java.util.Map.Entry` -- package segments join
+    * with `.`, enclosing classes join with `$`, matching the JVM's own binary-name spelling.
+    * Joining everything with `.` (as a naive walk of the owner chain would) turns a nested
+    * class's binary name into something `read` can never find on the classpath, silently
+    * collapsing every overload of every member of a nested Java type to `()`.
+    */
   private def binaryName(cls: ClassSymbol)(using Context): Option[String] = {
-    def ownerChain(sym: Symbol, acc: List[String]): Option[List[String]] =
+    def classChain(sym: Symbol, acc: List[String]): (List[String], Symbol) =
+      sym match {
+        case c: ClassSymbol => classChain(c.owner, simpleName(c) :: acc)
+        case other          => (acc, other)
+      }
+    def packageChain(sym: Symbol, acc: List[String]): Option[List[String]] =
       sym match {
         case null                                    => Some(acc)
         case pkg: PackageSymbol if pkg.owner == null => Some(acc)
-        case pkg: PackageSymbol => ownerChain(pkg.owner, pkg.name.toString :: acc)
-        case c: ClassSymbol     => ownerChain(c.owner, simpleName(c) :: acc)
+        case pkg: PackageSymbol => packageChain(pkg.owner, pkg.name.toString :: acc)
         case _                  => None
       }
-    ownerChain(cls.owner, Nil).map(prefix => (prefix :+ simpleName(cls)).mkString("."))
+    val (classSegments, afterClasses) = classChain(cls, Nil)
+    packageChain(afterClasses, Nil).map { pkgSegments =>
+      if (pkgSegments.isEmpty) classSegments.mkString("$")
+      else pkgSegments.mkString(".") + "." + classSegments.mkString("$")
+    }
   }
 
   private def simpleName(cls: ClassSymbol): String = {
@@ -89,6 +102,10 @@ final class JavaMethodOrder(classpath: Classpath) {
   */
 private object ClassfileMethods {
 
+  private val ACC_STATIC: Int = 0x0008
+  private val ACC_BRIDGE: Int = 0x0040
+  private val ACC_SYNTHETIC: Int = 0x1000
+
   def parse(bytes: IArray[Byte]): Option[Vector[JavaMethodOrderMethod]] =
     try Some(unsafeParse(bytes))
     catch {
@@ -116,9 +133,17 @@ private object ClassfileMethods {
       skipAttributes(in)
       val name: String =
         utf8.getOrElse(nameIndex, throw new RuntimeException(s"bad name index $nameIndex"))
-      val desc: String =
-        utf8.getOrElse(descIndex, throw new RuntimeException(s"bad descriptor index $descIndex"))
-      out += JavaMethodOrderMethod(name, (access & 0x0008) != 0, JvmDescriptor.paramTypes(desc))
+      // A bridge or compiler-synthesized method shares a real overload's name but has no
+      // dotty-side counterpart to number, so including it shifts every later same-named
+      // overload's index by one. `<clinit>` can never collide with a declared name; skipped
+      // anyway, for one less row to carry around.
+      val isBridgeOrSynthetic: Boolean = (access & ACC_BRIDGE) != 0 || (access & ACC_SYNTHETIC) != 0
+      if (name != "<clinit>" && !isBridgeOrSynthetic) {
+        val desc: String =
+          utf8.getOrElse(descIndex, throw new RuntimeException(s"bad descriptor index $descIndex"))
+        val isStatic: Boolean = (access & ACC_STATIC) != 0
+        out += JavaMethodOrderMethod(name, isStatic, JvmDescriptor.paramTypes(desc))
+      }
       i += 1
     }
     out.result()

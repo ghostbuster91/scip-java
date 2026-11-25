@@ -35,3 +35,10 @@ object JavaInterop:
   def trimmed(s: String): String = s.trim
 
   def indexed(s: String, c: Int): Int = s.indexOf(c)
+
+  // java.util.Calendar.Builder is a *nested* Java class, so its binary name is
+  // java/util/Calendar$Builder -- the hard case for JavaMethodOrder, which has to join
+  // packages with `.` and enclosing classes with `$` to find its classfile at all.
+  // setTimeOfDay has two overloads (3 and 4 int params); these pick both.
+  def calendar(): java.util.Calendar =
+    new java.util.Calendar.Builder().setTimeOfDay(1, 2, 3).setTimeOfDay(1, 2, 3, 4).build()
