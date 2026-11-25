@@ -357,7 +357,7 @@ public final class SemanticdbToScip {
    */
   private static boolean supportsReferenceRelationship(Semanticdb.SymbolInformation info) {
     return switch (info.getKind()) {
-      case INTERFACE, TYPE, CLASS, OBJECT, PACKAGE_OBJECT -> false;
+      case INTERFACE, TRAIT, TYPE, CLASS, OBJECT, PACKAGE_OBJECT -> false;
       default -> true;
     };
   }

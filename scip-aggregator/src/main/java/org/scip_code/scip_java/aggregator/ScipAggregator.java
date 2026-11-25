@@ -60,8 +60,9 @@ public class ScipAggregator {
   }
 
   public static void run(ScipAggregatorOptions options) throws IOException {
-    ScipWriter writer = new ScipWriter(options);
-    new ScipAggregator(writer, options).run();
+    try (ScipWriter writer = new ScipWriter(options)) {
+      new ScipAggregator(writer, options).run();
+    }
   }
 
   private void run() throws IOException {
@@ -84,7 +85,7 @@ public class ScipAggregator {
     options.reporter().startProcessing(shards.size());
     writer.emitTyped(metadataIndex());
 
-    Map<String, List<String>> inverseReferences = computeInverseReferences(shards, rewriter);
+    Map<String, List<String>> inverseReferences = computeInverseReferences(shards);
     Set<String> definedSymbols = ConcurrentHashMap.newKeySet();
     Map<String, SymbolInformation> externalSymbols = new ConcurrentHashMap<>();
     shardStream(shards)
@@ -168,6 +169,7 @@ public class ScipAggregator {
           }
         }
         writer.emitTyped(Index.newBuilder().addDocuments(rewritten).build());
+        writer.flush();
         options.reporter().processedOneItem();
       }
       // A shard carrying external symbols describes definitions outside the indexed sources,
@@ -213,46 +215,27 @@ public class ScipAggregator {
 
   private Document rewriteDocument(
       Document shard, SymbolRewriter rewriter, Map<String, List<String>> inverseReferences) {
-    Document.Builder out =
-        Document.newBuilder()
-            .setLanguage(shard.getLanguage())
-            .setRelativePath(shard.getRelativePath());
-    if (!shard.getText().isEmpty()) out.setText(shard.getText());
+    // Copy from `shard` so fields the aggregator does not rewrite (such as `position_encoding` and
+    // `diagnostics`) survive unchanged rather than being silently stripped.
+    Document.Builder out = Document.newBuilder(shard).clearOccurrences().clearSymbols();
 
     for (Occurrence occ : shard.getOccurrencesList()) {
+      if (occ.getTypedRangeCase() == Occurrence.TypedRangeCase.TYPEDRANGE_NOT_SET) {
+        throw new IllegalArgumentException("expected SCIP 0.9 typed occurrence range");
+      }
       Occurrence.Builder rebuilt =
-          Occurrence.newBuilder()
-              .setSymbol(rewriter.rewrite(occ.getSymbol()))
-              .setSymbolRoles(occ.getSymbolRoles());
-      switch (occ.getTypedRangeCase()) {
-        case SINGLE_LINE_RANGE -> rebuilt.setSingleLineRange(occ.getSingleLineRange());
-        case MULTI_LINE_RANGE -> rebuilt.setMultiLineRange(occ.getMultiLineRange());
-        case TYPEDRANGE_NOT_SET ->
-            throw new IllegalArgumentException("expected SCIP 0.9 typed occurrence range");
-      }
-      switch (occ.getTypedEnclosingRangeCase()) {
-        case SINGLE_LINE_ENCLOSING_RANGE ->
-            rebuilt.setSingleLineEnclosingRange(occ.getSingleLineEnclosingRange());
-        case MULTI_LINE_ENCLOSING_RANGE ->
-            rebuilt.setMultiLineEnclosingRange(occ.getMultiLineEnclosingRange());
-        case TYPEDENCLOSINGRANGE_NOT_SET -> {}
-      }
+          Occurrence.newBuilder(occ).setSymbol(rewriter.rewrite(occ.getSymbol()));
       out.addOccurrences(rebuilt);
     }
 
     for (SymbolInformation info : shard.getSymbolsList()) {
       SymbolInformation.Builder rebuilt =
-          SymbolInformation.newBuilder()
+          SymbolInformation.newBuilder(info)
               .setSymbol(rewriter.rewrite(info.getSymbol()))
-              .setDisplayName(info.getDisplayName())
-              .setKind(info.getKind());
-      if (info.hasSignatureDocumentation()) {
-        rebuilt.setSignatureDocumentation(info.getSignatureDocumentation());
-      }
+              .clearRelationships();
       if (!info.getEnclosingSymbol().isEmpty()) {
         rebuilt.setEnclosingSymbol(rewriter.rewrite(info.getEnclosingSymbol()));
       }
-      for (String doc : info.getDocumentationList()) rebuilt.addDocumentation(doc);
       for (Relationship rel : info.getRelationshipsList()) {
         rebuilt.addRelationships(
             Relationship.newBuilder(rel).setSymbol(rewriter.rewrite(rel.getSymbol())));
@@ -277,8 +260,7 @@ public class ScipAggregator {
    * Class/interface parent relationships are excluded because they shouldn't surface as
    * find-references results (TODO: drop once sourcegraph#50927 is fixed).
    */
-  private Map<String, List<String>> computeInverseReferences(
-      List<Path> shards, SymbolRewriter rewriter) {
+  private Map<String, List<String>> computeInverseReferences(List<Path> shards) {
     if (!options.emitInverseRelationships()) return Collections.emptyMap();
     Map<String, List<String>> result = new HashMap<>();
     for (Path shard : shards) {
@@ -300,7 +282,7 @@ public class ScipAggregator {
 
   private static boolean supportsReferenceRelationship(SymbolInformation info) {
     return switch (info.getKind()) {
-      case Class, Enum, Interface, Type, Object, PackageObject -> false;
+      case Class, Enum, Interface, Trait, Type, Object, PackageObject -> false;
       default -> true;
     };
   }

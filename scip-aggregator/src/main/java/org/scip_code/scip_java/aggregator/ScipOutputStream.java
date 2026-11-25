@@ -6,15 +6,17 @@ import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Low-level methods to write raw SCIP bytes into the output stream. */
-public class ScipOutputStream {
+public class ScipOutputStream implements AutoCloseable {
   private final OutputStream out;
   private final ConcurrentLinkedDeque<byte[]> buffer;
   private final AtomicBoolean isFlushing;
+  private final AtomicBoolean closed;
 
   public ScipOutputStream(OutputStream out) {
     this.out = out;
     this.buffer = new ConcurrentLinkedDeque<>();
     this.isFlushing = new AtomicBoolean(false);
+    this.closed = new AtomicBoolean(false);
   }
 
   public void write(byte[] bytes) {
@@ -24,13 +26,27 @@ public class ScipOutputStream {
 
   public void flush() throws IOException {
     if (isFlushing.compareAndSet(false, true)) {
-      byte[] bytes = buffer.poll();
-      while (bytes != null) {
-        out.write(bytes);
-        bytes = buffer.poll();
+      try {
+        byte[] bytes = buffer.poll();
+        while (bytes != null) {
+          out.write(bytes);
+          bytes = buffer.poll();
+        }
+        out.flush();
+      } finally {
+        isFlushing.set(false);
       }
-      out.flush();
-      isFlushing.set(false);
+    }
+  }
+
+  @Override
+  public void close() throws IOException {
+    if (closed.compareAndSet(false, true)) {
+      try {
+        flush();
+      } finally {
+        out.close();
+      }
     }
   }
 }

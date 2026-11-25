@@ -1,5 +1,6 @@
 package org.scip_code.scip_java.aggregator;
 
+import java.util.concurrent.ConcurrentHashMap;
 import org.scip_code.scip_java.shared.ScipSymbols;
 
 /**
@@ -12,6 +13,7 @@ import org.scip_code.scip_java.shared.ScipSymbols;
  */
 final class SymbolRewriter {
   private final PackageTable packages;
+  private final ConcurrentHashMap<String, String> cache = new ConcurrentHashMap<>();
 
   SymbolRewriter(PackageTable packages) {
     this.packages = packages;
@@ -21,7 +23,11 @@ final class SymbolRewriter {
   String rewrite(String symbol) {
     if (symbol == null || symbol.isEmpty()) return symbol;
     if (ScipSymbols.isLocal(symbol)) return symbol;
-    Package pkg = packages.packageForSymbol(symbol).orElse(Package.EMPTY);
-    return "scip-java " + pkg.scipTypedEncoding() + " " + symbol;
+    return cache.computeIfAbsent(
+        symbol,
+        s -> {
+          Package pkg = packages.packageForSymbol(s).orElse(Package.EMPTY);
+          return "scip-java " + pkg.scipTypedEncoding() + " " + s;
+        });
   }
 }
