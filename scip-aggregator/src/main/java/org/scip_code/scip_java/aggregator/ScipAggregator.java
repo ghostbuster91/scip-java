@@ -12,10 +12,13 @@ import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import java.util.stream.Stream;
@@ -82,7 +85,24 @@ public class ScipAggregator {
     writer.emitTyped(metadataIndex());
 
     Map<String, List<String>> inverseReferences = computeInverseReferences(shards, rewriter);
-    shardStream(shards).forEach(shard -> processShard(shard, rewriter, inverseReferences));
+    Set<String> definedSymbols = ConcurrentHashMap.newKeySet();
+    Map<String, SymbolInformation> externalSymbols = new ConcurrentHashMap<>();
+    shardStream(shards)
+        .forEach(
+            shard ->
+                processShard(shard, rewriter, inverseReferences, definedSymbols, externalSymbols));
+    // Emit external symbols only once all document shards have been walked: per-project front-ends
+    // (such as per-subproject TASTy conversion) each describe the symbols referenced outside their
+    // own project, which both duplicates common dependencies across subprojects and describes
+    // sibling-project definitions that another document shard already owns.
+    List<SymbolInformation> uniqueExternal =
+        externalSymbols.values().stream()
+            .filter(info -> !definedSymbols.contains(info.getSymbol()))
+            .sorted(Comparator.comparing(SymbolInformation::getSymbol))
+            .toList();
+    if (!uniqueExternal.isEmpty()) {
+      writer.emitTyped(Index.newBuilder().addAllExternalSymbols(uniqueExternal).build());
+    }
     writer.build();
     options.reporter().endProcessing();
   }
@@ -134,10 +154,19 @@ public class ScipAggregator {
   }
 
   private void processShard(
-      Path shardPath, SymbolRewriter rewriter, Map<String, List<String>> inverseReferences) {
+      Path shardPath,
+      SymbolRewriter rewriter,
+      Map<String, List<String>> inverseReferences,
+      Set<String> definedSymbols,
+      Map<String, SymbolInformation> externalSymbols) {
     for (Index shard : readShard(shardPath)) {
       for (Document document : shard.getDocumentsList()) {
         Document rewritten = rewriteDocument(document, rewriter, inverseReferences);
+        for (SymbolInformation info : rewritten.getSymbolsList()) {
+          if (!info.getSymbol().isEmpty() && ScipSymbols.isGlobal(info.getSymbol())) {
+            definedSymbols.add(info.getSymbol());
+          }
+        }
         writer.emitTyped(Index.newBuilder().addDocuments(rewritten).build());
         options.reporter().processedOneItem();
       }
@@ -145,9 +174,8 @@ public class ScipAggregator {
       // so it has no documents and no occurrences. Their symbols still need qualifying: they
       // are bare descriptors, and the package table resolves each to the dependency it came
       // from by classfile path, exactly as it does for a symbol referenced from Java.
-      List<SymbolInformation> external = rewriteExternalSymbols(shard, rewriter);
-      if (!external.isEmpty()) {
-        writer.emitTyped(Index.newBuilder().addAllExternalSymbols(external).build());
+      for (SymbolInformation info : rewriteExternalSymbols(shard, rewriter)) {
+        externalSymbols.putIfAbsent(info.getSymbol(), info);
       }
     }
   }

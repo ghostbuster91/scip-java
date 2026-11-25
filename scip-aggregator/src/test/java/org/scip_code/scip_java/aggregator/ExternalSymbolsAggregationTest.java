@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.scip_code.scip.Document;
 import org.scip_code.scip.Index;
 import org.scip_code.scip.SymbolInformation;
 import org.scip_code.scip.ToolInfo;
@@ -23,7 +24,9 @@ import org.scip_code.scip_java.shared.ScipShardWriter;
  *
  * <p>That is the whole risk being tested: shard reading used to return only the documents of each
  * {@link Index}, which discarded such a shard silently -- no error, no warning, and nothing in the
- * output to show it had happened.
+ * output to show it had happened. Multi-project builds also emit one external-symbols shard per
+ * project, so the aggregator must deduplicate shared dependencies and drop symbols already defined
+ * by a sibling project's document shard.
  */
 class ExternalSymbolsAggregationTest {
 
@@ -41,7 +44,7 @@ class ExternalSymbolsAggregationTest {
                 .setKind(SymbolInformation.Kind.Method)
                 .build()));
 
-    List<SymbolInformation> external = aggregate(tmp, targetroot);
+    List<SymbolInformation> external = aggregate(tmp, targetroot, /* parallel= */ false);
 
     assertEquals(1, external.size(), "the external-symbols shard must not be dropped");
     assertEquals("max", external.get(0).getDisplayName());
@@ -51,7 +54,59 @@ class ExternalSymbolsAggregationTest {
         external.get(0).getSymbol().endsWith("java/lang/Math#max()."), external.get(0).getSymbol());
   }
 
-  private List<SymbolInformation> aggregate(Path tmp, Path targetroot) throws IOException {
+  @Test
+  void deduplicatesExternalSymbolsAndDropsSiblingProjectDefinitions(@TempDir Path tmp)
+      throws IOException {
+    Path targetroot = Files.createDirectories(tmp.resolve("targetroot"));
+    Path scipRoot = targetroot.resolve(ScipShardPaths.SCIP_ROOT);
+
+    // Project 1 defines `p1/Foo#` in a document shard.
+    Path docShard = scipRoot.resolve("p1/Foo.scala.scip");
+    ScipShardWriter.writeShard(
+        docShard,
+        Document.newBuilder()
+            .setLanguage("scala")
+            .setRelativePath("p1/Foo.scala")
+            .addSymbols(
+                SymbolInformation.newBuilder()
+                    .setSymbol("p1/Foo#")
+                    .setDisplayName("Foo")
+                    .setKind(SymbolInformation.Kind.Class)
+                    .build())
+            .build());
+
+    SymbolInformation sharedDep =
+        SymbolInformation.newBuilder()
+            .setSymbol("java/lang/Math#max().")
+            .setDisplayName("max")
+            .setKind(SymbolInformation.Kind.Method)
+            .build();
+    SymbolInformation siblingRef =
+        SymbolInformation.newBuilder()
+            .setSymbol("p1/Foo#")
+            .setDisplayName("Foo")
+            .setKind(SymbolInformation.Kind.Class)
+            .build();
+
+    // Two subprojects both reference `java/lang/Math#max().`, and subproject 2 also references
+    // sibling `p1/Foo#` which is already defined in `p1/Foo.scala.scip`.
+    ScipShardWriter.writeExternalSymbols(
+        scipRoot.resolve("external-symbols-tasty-p1.scip"), List.of(sharedDep));
+    ScipShardWriter.writeExternalSymbols(
+        scipRoot.resolve("external-symbols-tasty-p2.scip"), List.of(sharedDep, siblingRef));
+
+    List<SymbolInformation> external = aggregate(tmp, targetroot, /* parallel= */ true);
+
+    assertEquals(
+        1,
+        external.size(),
+        "shared dependencies must be deduplicated and sibling definitions omitted: " + external);
+    assertTrue(
+        external.get(0).getSymbol().endsWith("java/lang/Math#max()."), external.get(0).getSymbol());
+  }
+
+  private List<SymbolInformation> aggregate(Path tmp, Path targetroot, boolean parallel)
+      throws IOException {
     Path output = tmp.resolve("index.scip");
     ScipAggregator.run(
         new ScipAggregatorOptions(
@@ -60,7 +115,7 @@ class ExternalSymbolsAggregationTest {
             tmp,
             new ScipAggregatorReporter() {},
             ToolInfo.newBuilder().setName("test").setVersion("0").build(),
-            /* parallel= */ false,
+            parallel,
             List.of(),
             /* emitInverseRelationships= */ false,
             /* allowEmptyIndex= */ true,
