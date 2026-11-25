@@ -126,14 +126,45 @@ final class TastyDocumentIndexer(
           // The name to look for in the source comes from the resolved symbol, not the
           // tree: a `Select` of an overloaded method carries a `SignedName`, whose
           // `toString` includes the erased signature and would never match the source.
-          case ref: TermReferenceTree => resolved(ref).foreach(reference(ref.pos, _))
+          //
+          // A constructor call is the exception: it is pickled as `Select(New(tpt), "<init>")`,
+          // and `<init>` is never written in source, so matching the resolved symbol's own
+          // name would always miss. The class name the `New` targets is what the compiler's
+          // own extractor anchors the constructor reference to instead.
+          case ref: TermReferenceTree =>
+            resolved(ref).foreach { sym =>
+              constructorAnchor(ref) match {
+                case Some((pos, name)) => reference(pos, sym, name)
+                case None              => reference(ref.pos, sym)
+              }
+            }
           case ti: TypeIdent          => typeSymbol(ti).foreach(reference(ti.pos, _))
           case st: SelectTypeTree     => typeSymbol(st).foreach(reference(st.pos, _))
           // The package part of a qualified type name -- the `lang` of
           // `new java.lang.StringBuilder`. It is a `TypeTree` rather than a
           // `TermReferenceTree`, so it needs its own case or the prefix goes unindexed.
           case trt: TermRefTypeTree   => prefixSymbol(trt).foreach(reference(trt.pos, _))
-          case _                      => ()
+          // `import foo.{bar => baz}`: `ImportIdent` carries no type of its own (it is not
+          // a `TermReferenceTree`), so the member it names has to be looked up by hand from
+          // the qualifier's declarations. Only the original name (`bar`) is anchored here --
+          // an alias (`baz`) introduces a new local binding rather than referencing one. The
+          // qualifier itself (`foo`) is handled explicitly too: a bare package path gets no
+          // occurrence from the compiler, but a term qualifier like an object does.
+          case imp: Import =>
+            imp.expr match {
+              case ref: TermReferenceTree =>
+                resolved(ref)
+                  .filterNot(_.isInstanceOf[PackageSymbol])
+                  .foreach(reference(ref.pos, _))
+              case _ => ()
+            }
+            imp.selectors.foreach { sel =>
+              if (!sel.isWildcard) {
+                importSelectorSymbols(imp.expr, sel.imported.name.toString)
+                  .foreach(reference(sel.imported.pos, _))
+              }
+            }
+          case _ => ()
         }
         super.traverse(tree)
       }
@@ -158,8 +189,38 @@ final class TastyDocumentIndexer(
       case _             => None
     }
 
+  /** The symbols an import selector names, found by hand: `ImportIdent` carries no type of
+    * its own, unlike every other reference here, so there is no `.symbol` to read off the
+    * tree -- the qualifier's declarations have to be searched by name instead.
+    *
+    * More than one symbol can share the selected name -- `Try` is both a class and its
+    * companion object's value -- and the compiler describes the import as referencing all
+    * of them, not just whichever one a name lookup happens to find first.
+    */
+  private def importSelectorSymbols(expr: TermTree, name: String): List[Symbol] =
+    declarationsOf(expr).toList.flatten.filter(_.name.toString == name)
+
+  /** The members declared by what `expr` -- an import clause's qualifier -- evaluates to. */
+  private def declarationsOf(expr: TermTree): Option[List[Symbol]] =
+    scala.util.Try(expr.tpe).toOption.flatMap {
+      case p: PackageRef => scala.util.Try(p.symbol).toOption.map(_.declarations)
+      case t: TermRef =>
+        scala.util.Try(t.symbol).toOption.flatMap(_.moduleClass.map(_.declarations))
+      case tr: TypeRef => tr.optSymbol.collect { case cls: ClassSymbol => cls.declarations }
+      case _           => None
+    }
+
   private def definition(tree: DefTree, sym: Symbol, name: String): Unit =
-    if (!TastyExclusions.excludeDefinition(tree)) {
+    if (TastyExclusions.isConstructor(sym)) {
+      // A constructor with no explicit parameter list -- `class Overloads:`, say -- has a
+      // zero-extent position, which `excludeDefinition` would otherwise treat as "not
+      // present in source" and skip entirely. That is right for the *occurrence* (there is
+      // nothing to anchor a range to), but wrong for *ownership*: the constructor is still
+      // a symbol this project defines, and `new Overloads(...)` still has to resolve to
+      // something the index knows is not external.
+      describeWithoutOccurrence(tree, sym, name)
+      constructorMarker(tree, sym)
+    } else if (!TastyExclusions.excludeDefinition(tree)) {
       // An auto-generated companion -- the one an `enum` or `case class` gets for free --
       // sits at the same position as the class itself, so it must not claim an occurrence:
       // that would put both `Color#` and `Color.` on the name `Color`, where the compiler
@@ -175,11 +236,10 @@ final class TastyDocumentIndexer(
             recordAtOffset(tree.pos.startOffset, symbol)
           }
         case None =>
-          // No range to claim: the name is not written at this position. A constructor, a
-          // module class, a setter, a `given` -- all real symbols that the compiler
-          // describes without an occurrence, and all of them clique members.
+          // No range to claim: the name is not written at this position. A module class, a
+          // setter, a `given` -- all real symbols that the compiler describes without an
+          // occurrence, and all of them clique members.
           describeWithoutOccurrence(tree, sym, name)
-          if (TastyExclusions.isConstructor(sym)) constructorMarker(tree, sym)
       }
     }
 
@@ -224,8 +284,29 @@ final class TastyDocumentIndexer(
       }
     }
 
-  private def reference(pos: SourcePosition, sym: Symbol): Unit = {
-    val name: String = sym.name.toString
+  /** Where and what to match for a `new Foo(...)` constructor call, if `ref` is one.
+    *
+    * `Foo` is what is actually written at the call site; `tpt` may itself be wrapped (`new
+    * Foo[Int]()`), so the applied type's constructor is unwrapped down to the named class.
+    */
+  private def constructorAnchor(ref: TermReferenceTree): Option[(SourcePosition, String)] =
+    ref match {
+      case Select(nw: New, _) => classNameAndPos(nw.tpt)
+      case _                  => None
+    }
+
+  private def classNameAndPos(tpt: TypeTree): Option[(SourcePosition, String)] =
+    tpt match {
+      case ti: TypeIdent       => Some((ti.pos, ti.name.toString))
+      case st: SelectTypeTree  => Some((st.pos, st.name.toString))
+      case at: AppliedTypeTree => classNameAndPos(at.tycon)
+      case _                   => None
+    }
+
+  private def reference(pos: SourcePosition, sym: Symbol): Unit =
+    reference(pos, sym, sym.name.toString)
+
+  private def reference(pos: SourcePosition, sym: Symbol, name: String): Unit = {
     nameRange(pos, name).foreach { range =>
       symbolFor(sym, definitionPos(sym), name).foreach { symbol =>
         emit(symbol, range, Occurrence.newBuilder())
@@ -321,11 +402,26 @@ final class TastyDocumentIndexer(
     */
   private def nameRange(pos: SourcePosition, name: String): Option[ScipRange] =
     if (pos.isUnknown || pos.sourceFile.path != pickledPath) None
-    else candidates(pos).find(at => matchesAt(at, name)).map(start => rangeOf(start, name.length))
+    else candidates(pos).flatMap(candidateRange(_, name)).headOption
 
   private def candidates(pos: SourcePosition): List[Int] =
     // `Select` points at the selected name; `Ident` and most definitions start on it.
     List(pos.pointOffset, pos.startOffset).distinct
+
+  /** The range at `candidate`, if `name` is written there.
+    *
+    * A backticked identifier -- `` `type` ``, say, naming a reserved word -- is pickled at
+    * the position of the backtick itself, not the name inside it, so the name has to be
+    * checked one character further in. The range itself includes the backticks, matching
+    * the compiler's own convention of quoting the whole occurrence, not just the name.
+    */
+  private def candidateRange(candidate: Int, name: String): Option[ScipRange] = {
+    val quoted: Boolean = candidate >= 0 && candidate < text.length && text.charAt(candidate) == '`'
+    val nameStart: Int = if (quoted) candidate + 1 else candidate
+    if (!matchesAt(nameStart, name)) None
+    else if (quoted) Some(rangeOf(candidate, name.length + 2))
+    else Some(rangeOf(candidate, name.length))
+  }
 
   private def matchesAt(start: Int, name: String): Boolean =
     start >= 0 &&

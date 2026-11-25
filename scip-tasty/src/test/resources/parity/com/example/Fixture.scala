@@ -18,6 +18,27 @@ class Overloads:
 
   type Alias = Int
 
+  // A backticked identifier naming a reserved word, referenced using the same backticks:
+  // the occurrence has to be anchored past the opening quote, at "type" itself.
+  def `type`: Int = 1
+  def useReservedWord(): Int = `type`
+
+  // Import selectors, exercised as local imports so they live inside this class's own
+  // tree: a top-level import sits in the enclosing `PackageDef`, which tasty-query exposes
+  // only through `private[tastyquery] topLevelTasty`, so it cannot be walked from here.
+  // `Try` names both a class and its companion value, and `default` is an aliased import
+  // of another top-level object's member -- forward-referenced, since every top-level
+  // definition in a file is visible regardless of textual order.
+  //
+  // The alias itself (`greetingDefault`) is deliberately left unused here: using it would
+  // require matching the *alias* text at its use site against the real symbol's bare name
+  // ("default"), a separate, broader gap this does not attempt to close.
+  def useImports(): Greeting = {
+    import scala.util.{Try => Attempt}
+    import Greeting.{default => greetingDefault}
+    Greeting.default
+  }
+
 case class Greeting(name: String, times: Int):
   // Synthetic members (`copy`, `copy$default$1`, `productElement`, ...) are pickled into
   // TASTy and are partitioned *after* non-synthetic ones when numbering overloads.
@@ -44,3 +65,9 @@ object Show:
 def topLevel(n: Int): Int = n + 1
 
 val topLevelValue: Int = 1
+
+// `new X(...)` constructor calls: `<init>` is never written in source, so the reference
+// has to be anchored to the class name instead -- both the no-arg and the parameterized
+// shape, since only one of them has args to also walk into.
+def freshOverloads(): Overloads = new Overloads()
+def freshGreeting(n: String): Greeting = new Greeting(n, 1)
