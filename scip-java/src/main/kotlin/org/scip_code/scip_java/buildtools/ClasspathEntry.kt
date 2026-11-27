@@ -47,6 +47,11 @@ data class ClasspathEntry(
 
         private fun discoverDependenciesFromFiles(targetroot: Path): List<ClasspathEntry> {
             if (!Files.isDirectory(targetroot)) return emptyList()
+            // Sorted, so the order packages are listed in -- the last tiebreak when two packages
+            // provide the same classfile -- does not depend on the directory listing. Deduplicated
+            // per file only: a package listed by several projects stays listed once per project,
+            // because how many projects compiled against it is what `PackageTable` attributes a
+            // contested classfile by.
             return Files.list(targetroot).use { stream ->
                 stream
                     .filter {
@@ -55,12 +60,14 @@ data class ClasspathEntry(
                     }
                     .toArray()
                     .map { it as Path }
-                    .flatMap { fromDependencies(it) }
-                    .distinct()
+                    .sortedBy { it.fileName.toString() }
+                    .flatMap { fromDependencies(it).distinct() }
             }
         }
 
-        private fun fromDependencies(dependencies: Path): List<ClasspathEntry> =
+        /** Parses one `*dependencies.txt` file: `groupId ⇥ artifactId ⇥ version ⇥ path` lines. */
+        @JvmStatic
+        fun fromDependencies(dependencies: Path): List<ClasspathEntry> =
             Files.readAllLines(dependencies, StandardCharsets.UTF_8).mapNotNull { line ->
                 val parts = line.split('\t')
                 if (parts.size == 4) {

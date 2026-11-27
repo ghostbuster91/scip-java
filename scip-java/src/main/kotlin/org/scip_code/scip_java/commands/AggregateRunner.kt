@@ -6,6 +6,7 @@ import org.scip_code.scip_java.ScipJava
 import org.scip_code.scip_java.ScipJavaApp
 import org.scip_code.scip_java.aggregator.ScipAggregator
 import org.scip_code.scip_java.aggregator.ScipAggregatorOptions
+import org.scip_code.scip_java.buildtools.BuildProjects
 import org.scip_code.scip_java.buildtools.ClasspathEntry
 
 /**
@@ -28,12 +29,12 @@ object AggregateRunner {
             else targetroots.map { sourceroot.resolve(it) }
         val absoluteOutput = sourceroot.resolve(output)
 
+        // Not deduplicated: a package listed by several projects is repeated once per project,
+        // which `PackageTable` counts to attribute a classfile more than one package provides.
         val packages =
-            absoluteTargetroots
-                .asSequence()
-                .flatMap { ClasspathEntry.fromTargetroot(it, sourceroot).asSequence() }
-                .distinct()
-                .toList()
+            absoluteTargetroots.distinct().flatMap { ClasspathEntry.fromTargetroot(it, sourceroot) }
+        // Most preferred first: the earliest project that could own a document does.
+        val projects = absoluteTargetroots.distinct().flatMap { BuildProjects.fromTargetroot(it) }
 
         val options =
             ScipAggregatorOptions(
@@ -47,6 +48,7 @@ object AggregateRunner {
                 emitInverseRelationships,
                 allowEmptyIndex,
                 allowExportingGlobalSymbolsFromDirectoryEntries,
+                projects,
             )
         ScipAggregator.run(options)
         // The one seam where accumulated reporter errors become an exit code:

@@ -26,6 +26,13 @@
 //      compiler flag -- every Scala 3 compilation emits it beside the class
 //      files -- so this reports locations only, as in (3). The classpath goes
 //      with it because TASTy cannot be read without one.
+//   5. Writes the class directories of every project to `*.class-dirs.txt`, and
+//      its Scala version next to the build's default to `*.scala-version.txt`.
+//      The first tells scip-java which project compiled a Java source -- the one
+//      whose class directory holds its classes -- so that source is attributed
+//      against that project's classpath. The second decides which project
+//      describes a source that several cross-built projects compile: the one on
+//      the build's default Scala version.
 //
 // Both paths arrive as the `scip.javaHome` and `scip.targetroot` system
 // properties. Each is optional: without them the plugin is a no-op, which keeps
@@ -188,6 +195,15 @@ object ScipSbtPlugin extends AutoPlugin {
     }
 
     write(projectId, base, ".dependencies.txt", lines.toSeq)
+    write(
+      projectId,
+      base,
+      ".class-dirs.txt",
+      Seq((Compile / classDirectory).value.toString, (Test / classDirectory).value.toString).distinct,
+    )
+    // The project's version, then the build's: `ThisBuild / scalaVersion` is what a project
+    // that does not choose its own compiles with, which is what "default" means here.
+    write(projectId, base, ".scala-version.txt", Seq(scalaVersion.value, (ThisBuild / scalaVersion).value))
   }
 
   /**

@@ -10,13 +10,19 @@ import org.scip_code.scip_java.shared.ScipSymbols;
  * a {@link PackageTable}.
  *
  * <p>Local symbols (those starting with {@code "local "}) are passed through unchanged.
+ *
+ * <p>One rewriter serves the documents of one project, because the same bare symbol can belong to
+ * different packages depending on which project's classpath it was compiled against; {@code
+ * project} is {@code null} for documents no project was found to own.
  */
 final class SymbolRewriter {
   private final PackageTable packages;
+  private final ScipProject project;
   private final ConcurrentHashMap<String, String> cache = new ConcurrentHashMap<>();
 
-  SymbolRewriter(PackageTable packages) {
+  SymbolRewriter(PackageTable packages, ScipProject project) {
     this.packages = packages;
+    this.project = project;
   }
 
   /** Rewrites {@code symbol}, or returns {@code symbol} unchanged when no rewriting applies. */
@@ -26,7 +32,7 @@ final class SymbolRewriter {
     return cache.computeIfAbsent(
         symbol,
         s -> {
-          Package pkg = packages.packageForSymbol(s).orElse(Package.EMPTY);
+          Package pkg = packages.packageForSymbol(s, project).orElse(Package.EMPTY);
           return "scip-java " + pkg.scipTypedEncoding() + " " + s;
         });
   }

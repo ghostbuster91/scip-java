@@ -40,7 +40,8 @@ import org.scip_code.scip_java.shared.ScipSymbols;
  * <ul>
  *   <li>discovers shards under each requested target root,
  *   <li>resolves each shard's bare-descriptor symbols to fully-qualified SCIP symbols using a
- *       {@link PackageTable},
+ *       {@link PackageTable}, against the classpath of the project {@link ProjectOwners} finds owns
+ *       the document,
  *   <li>optionally adds inverse-reference relationships across documents, and
  *   <li>emits a single {@link Index} with leading {@link Metadata}.
  * </ul>
@@ -67,7 +68,8 @@ public class ScipAggregator {
 
   private void run() throws IOException {
     PackageTable packages = new PackageTable(options);
-    SymbolRewriter rewriter = new SymbolRewriter(packages);
+    ProjectOwners owners = new ProjectOwners(options.projects());
+    Rewriters rewriter = new Rewriters(packages, owners);
     List<Path> shards = findShards();
     Collections.sort(shards);
     if (options.reporter().hasErrors()) return;
@@ -106,6 +108,38 @@ public class ScipAggregator {
     }
     writer.build();
     options.reporter().endProcessing();
+    if (!owners.isEmpty()) options.reporter().info(owners.summary());
+  }
+
+  /**
+   * One {@link SymbolRewriter} per project, created on first use, and the owner lookup that picks
+   * between them. Its cache is per rewriter because a bare symbol can qualify differently per
+   * project.
+   */
+  private static final class Rewriters {
+    private final PackageTable packages;
+    private final ProjectOwners owners;
+    private final SymbolRewriter unowned;
+    private final Map<String, SymbolRewriter> byProject = new ConcurrentHashMap<>();
+
+    Rewriters(PackageTable packages, ProjectOwners owners) {
+      this.packages = packages;
+      this.owners = owners;
+      this.unowned = new SymbolRewriter(packages, null);
+    }
+
+    SymbolRewriter forDocument(Path shard, Document document) {
+      return forProject(owners.ownerOf(shard, document));
+    }
+
+    SymbolRewriter forShard(Path shard) {
+      return forProject(owners.recordedOwner(shard).orElse(null));
+    }
+
+    private SymbolRewriter forProject(ScipProject project) {
+      if (project == null) return unowned;
+      return byProject.computeIfAbsent(project.key(), k -> new SymbolRewriter(packages, project));
+    }
   }
 
   /**
@@ -156,12 +190,13 @@ public class ScipAggregator {
 
   private void processShard(
       Path shardPath,
-      SymbolRewriter rewriter,
+      Rewriters rewriters,
       Map<String, List<String>> inverseReferences,
       Set<String> definedSymbols,
       Map<String, SymbolInformation> externalSymbols) {
     for (Index shard : readShard(shardPath)) {
       for (Document document : shard.getDocumentsList()) {
+        SymbolRewriter rewriter = rewriters.forDocument(shardPath, document);
         Document rewritten = rewriteDocument(document, rewriter, inverseReferences);
         for (SymbolInformation info : rewritten.getSymbolsList()) {
           if (!info.getSymbol().isEmpty() && ScipSymbols.isGlobal(info.getSymbol())) {
@@ -176,7 +211,7 @@ public class ScipAggregator {
       // so it has no documents and no occurrences. Their symbols still need qualifying: they
       // are bare descriptors, and the package table resolves each to the dependency it came
       // from by classfile path, exactly as it does for a symbol referenced from Java.
-      for (SymbolInformation info : rewriteExternalSymbols(shard, rewriter)) {
+      for (SymbolInformation info : rewriteExternalSymbols(shard, rewriters.forShard(shardPath))) {
         externalSymbols.putIfAbsent(info.getSymbol(), info);
       }
     }

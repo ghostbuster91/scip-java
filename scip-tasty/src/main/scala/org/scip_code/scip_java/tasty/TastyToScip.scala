@@ -46,6 +46,7 @@ object TastyToScip {
     val shardsWritten: Int,
     val warnings: ju.List[String],
     val coveredSources: ju.Set[String],
+    val writtenShards: ju.List[Path],
   )
 
   /** Indexes every Scala 3 class found in `classDirs`.
@@ -58,6 +59,11 @@ object TastyToScip {
     * converting one project at a time -- one subproject of a multi-module sbt build, say --
     * must pass a discriminator unique to that project, or each call's shard overwrites the
     * last one's.
+    *
+    * `skipping` lists source-root-relative paths another project already wrote a shard for.
+    * A shard path is a function of the source path alone, so when several projects compile
+    * one source -- cross-built subprojects sharing a source directory -- the caller decides
+    * which project describes it by converting that one first, and every later call skips it.
     */
   def convert(
     sourceRoot: Path,
@@ -65,9 +71,11 @@ object TastyToScip {
     classDirs: ju.List[Path],
     classpath: ju.List[Path],
     shardDiscriminator: String,
+    skipping: ju.Set[String],
   ): Result = {
     val warnings = mutable.ListBuffer.empty[String]
     val covered = mutable.LinkedHashSet.empty[String]
+    val shards = mutable.ListBuffer.empty[Path]
 
     val written: Int =
       try
@@ -77,8 +85,10 @@ object TastyToScip {
           classDirs,
           classpath,
           shardDiscriminator,
+          skipping.asScala.toSet,
           warnings,
           covered,
+          shards,
         )
       catch {
         // Reading the classpath and initializing the context can both fail -- an unreadable
@@ -98,8 +108,18 @@ object TastyToScip {
           0
       }
 
-    new Result(written, warnings.toList.asJava, covered.asJava)
+    new Result(written, warnings.toList.asJava, covered.asJava, shards.toList.asJava)
   }
+
+  /** [[convert]] for a caller converting a single project, which has nothing to skip. */
+  def convert(
+    sourceRoot: Path,
+    targetRoot: Path,
+    classDirs: ju.List[Path],
+    classpath: ju.List[Path],
+    shardDiscriminator: String,
+  ): Result =
+    convert(sourceRoot, targetRoot, classDirs, classpath, shardDiscriminator, ju.Set.of())
 
   private def convertInto(
     sourceRoot: Path,
@@ -107,8 +127,10 @@ object TastyToScip {
     classDirs: ju.List[Path],
     classpath: ju.List[Path],
     shardDiscriminator: String,
+    skipping: Set[String],
     warnings: mutable.ListBuffer[String],
     covered: mutable.LinkedHashSet[String],
+    shards: mutable.ListBuffer[Path],
   ): Int = {
     var written: Int = 0
     val defined = mutable.HashSet.empty[String]
@@ -127,6 +149,9 @@ object TastyToScip {
         relativize(sourceRoot, pickledPath) match {
           case None =>
             warnings += s"skipping $pickledPath: outside the source root $sourceRoot"
+          case Some(relativePath) if skipping.contains(relativePath) =>
+            // A project converted earlier already describes this source; see `convert`.
+            ()
           case Some(relativePath) =>
             readSource(sourceRoot, relativePath) match {
               case None =>
@@ -145,6 +170,7 @@ object TastyToScip {
                   Files.createDirectories(shard.getParent)
                   ScipShardWriter.writeShard(shard, document)
                   covered += relativePath
+                  shards += shard
                   written += 1
                 }
             }
@@ -158,7 +184,13 @@ object TastyToScip {
       }
     }
 
-    writeExternalSymbols(targetRoot, shardDiscriminator, defined.toSet, referenced.toList, warnings)
+    shards ++= writeExternalSymbols(
+      targetRoot,
+      shardDiscriminator,
+      defined.toSet,
+      referenced.toList,
+      warnings,
+    )
     written
   }
 
@@ -180,7 +212,7 @@ object TastyToScip {
     defined: Set[String],
     referenced: List[(String, Symbol)],
     warnings: mutable.ListBuffer[String],
-  )(using Context, JavaOrderLookup): Unit = {
+  )(using Context, JavaOrderLookup): Option[Path] = {
     // No clique relationships here: a clique ties together symbols sharing one definition
     // occurrence, and an external symbol has no occurrence in this repository at all.
     val external: List[SymbolInformation] = referenced.collect {
@@ -190,7 +222,8 @@ object TastyToScip {
           .toOption
     }.flatten
 
-    if (external.nonEmpty) {
+    if (external.isEmpty) None
+    else {
       // Discriminated by project: a caller converting one project per call -- one
       // subproject of a multi-module sbt build -- would otherwise have each call's shard
       // overwrite the last one's, silently dropping every earlier project's external
@@ -202,8 +235,11 @@ object TastyToScip {
       try {
         Files.createDirectories(shard.getParent)
         ScipShardWriter.writeExternalSymbols(shard, external.asJava)
+        Some(shard)
       } catch {
-        case e: IOException => warnings += s"failed to write external symbols: $e"
+        case e: IOException =>
+          warnings += s"failed to write external symbols: $e"
+          None
       }
     }
   }

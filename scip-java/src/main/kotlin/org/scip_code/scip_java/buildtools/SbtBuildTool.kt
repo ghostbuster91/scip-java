@@ -50,9 +50,9 @@ class SbtBuildTool(index: IndexCommand) : BuildTool("sbt", index) {
         }
         val result = runBuild()
         if (result.exitCode == 0) {
-            // TASTy first, and SemanticDB only for what it did not cover. Both derive a shard
-            // path from the source path alone, so letting them both write the same source would
-            // silently overwrite one with the other.
+            // TASTy first, and SemanticDB only for what it did not cover, project by project.
+            // Both derive a shard path from the source path alone, so letting them both write the
+            // same source would silently overwrite one with the other.
             val unsupported = TastyVersion.unsupported(scalaVersions())
             if (unsupported.isNotEmpty()) {
                 // Reported rather than worked around. TASTy rejects a newer minor outright, so
@@ -61,37 +61,94 @@ class SbtBuildTool(index: IndexCommand) : BuildTool("sbt", index) {
                 index.app.error(TastyVersion.mismatchMessage(unsupported))
                 return 1
             }
-            val covered = convertTasty()
-            convertSemanticdb(covered)
+            convertScala()
             reportMissingScipOutput()
         }
         return generateScipFromTargetroot(result, targetroot(), index)
     }
 
     /**
-     * Turns the SemanticDB files scalac emitted into SCIP shards, which is how Scala sources get
-     * indexed. The directories to read come from `*.semanticdb-roots.txt` files that the injected
-     * sbt plugin writes, one per project.
+     * Turns what the Scala compilers emitted into SCIP shards, one sbt project at a time: TASTy for
+     * Scala 3, then SemanticDB for whatever TASTy did not cover -- Scala 2 sources, and any whose
+     * TASTy this build of scip-java is too old to read.
+     *
+     * Projects are converted most preferred first (see [rankProjects]), and every source a project
+     * converted is skipped by the projects after it. A shard path is a function of the source path
+     * alone, so when cross-built projects compile one shared source directory only one of them can
+     * describe it; this makes that the project on the build's default Scala version rather than
+     * whichever happened to be converted last.
+     *
+     * Each project's shards are recorded in `<key>.shards.txt`, and the ranking in `projects.txt`,
+     * so the aggregator attributes each document against the classpath of the project that wrote
+     * it.
      */
-    private fun convertSemanticdb(alreadyCovered: Set<String>) {
+    private fun convertScala() {
+        val ranking = rankProjects(readScalaVersions())
+        val keys = (tastyProjectKeys() + semanticdbProjectKeys()).distinct()
+        val ordered = ranking.filter { it in keys } + (keys - ranking.toSet()).sorted()
+        val covered = mutableSetOf<String>()
+        val tasty = Conversions("TASTy")
+        val semanticdb = Conversions("SemanticDB")
+        for (key in ordered) {
+            val shards = mutableListOf<Path>()
+            convertTasty(key, covered)?.let { result ->
+                tasty.add(result.shardsWritten(), result.warnings())
+                covered += result.coveredSources()
+                shards += result.writtenShards()
+            }
+            convertSemanticdb(key, covered)?.let { result ->
+                semanticdb.add(result.shardsWritten, result.warnings)
+                covered += result.coveredSources
+                shards += result.writtenShards
+            }
+            if (shards.isNotEmpty()) {
+                writeLines(
+                    key + BuildProjects.SHARDS_SUFFIX,
+                    shards.map { targetroot().relativize(it).toString() },
+                )
+            }
+        }
+        if (ranking.isNotEmpty()) writeLines(BuildProjects.PREFERENCE_FILE, ranking)
+        tasty.report { "indexed $it Scala 3 source(s) from TASTy" }
+        semanticdb.report { "converted $it SemanticDB file(s) into SCIP shards" }
+    }
+
+    /** Shards written and warnings collected across every project, reported once at the end. */
+    private inner class Conversions(private val name: String) {
+        private var written = 0
+        private val warnings = mutableListOf<String>()
+
+        fun add(shards: Int, more: List<String>) {
+            written += shards
+            warnings += more
+        }
+
+        // Warnings, not errors: each one costs at most one source file's worth of index, and
+        // reporting them as errors would stop the aggregator from writing an index for everything
+        // that did convert.
+        fun report(summary: (Int) -> String) {
+            warnings.take(MAX_REPORTED_WARNINGS).forEach { index.app.warning(it) }
+            val unreported = warnings.size - MAX_REPORTED_WARNINGS
+            if (unreported > 0) {
+                index.app.warning("$unreported more $name conversion warning(s) not shown")
+            }
+            if (written > 0) index.app.info(summary(written))
+        }
+    }
+
+    /**
+     * Converts the SemanticDB files of one project, read from the `<key>.semanticdb-roots.txt` the
+     * injected sbt plugin wrote for it, skipping sources an earlier conversion covered.
+     */
+    private fun convertSemanticdb(key: String, covered: Set<String>): SemanticdbToScip.Result? {
         val roots =
-            readReportedPaths(".semanticdb-roots.txt").filter { Files.isDirectory(it) }.distinct()
-        if (roots.isEmpty()) return
-        val result =
-            SemanticdbToScip(index.workingDirectory, targetroot())
-                .skipping(alreadyCovered)
-                .convert(roots)
-        // Warnings, not errors: each one costs at most one source file's worth of
-        // index, and reporting them as errors would stop the aggregator from
-        // writing an index for everything that did convert.
-        result.warnings.take(MAX_REPORTED_WARNINGS).forEach { index.app.warning(it) }
-        val unreported = result.warnings.size - MAX_REPORTED_WARNINGS
-        if (unreported > 0) {
-            index.app.warning("$unreported more SemanticDB conversion warning(s) not shown")
-        }
-        if (result.shardsWritten > 0) {
-            index.app.info("converted ${result.shardsWritten} SemanticDB file(s) into SCIP shards")
-        }
+            readReportedPath("$key.semanticdb-roots.txt")
+                .filter { Files.isDirectory(it) }
+                .distinct()
+        if (roots.isEmpty()) return null
+        return SemanticdbToScip(index.workingDirectory, targetroot())
+            .skipping(covered)
+            .convert(roots)
     }
 
     /**
@@ -123,73 +180,71 @@ class SbtBuildTool(index: IndexCommand) : BuildTool("sbt", index) {
     }
 
     /**
-     * Turns the TASTy the Scala 3 compiler emitted into SCIP shards, and reports which sources it
-     * covered so [convertSemanticdb] can leave those alone.
+     * Converts the TASTy of one project, skipping sources an earlier conversion covered.
      *
-     * Converted one sbt project at a time, each with its own `tastyProjectKeys()` classpath, rather
-     * than merging every subproject's classpath into one `TastyToScip.convert` call: a merged
-     * classpath holds every subproject's dependency jars at once, which is both wasted peak memory
+     * Converted one sbt project at a time, each with its own classpath, rather than merging every
+     * subproject's classpath into one `TastyToScip.convert` call: a merged classpath holds every
+     * subproject's dependency jars at once, which is both wasted peak memory
      * (`ClasspathLoaders.read` loads every entry eagerly) and a correctness risk -- if two
      * subprojects depend on different versions of the same library, only one version's classfiles
      * can occupy one merged classpath, and the other subproject resolves against the wrong one.
      */
-    private fun convertTasty(): Set<String> {
-        val keys = tastyProjectKeys()
-        if (keys.isEmpty()) return emptySet()
-        val covered = mutableSetOf<String>()
-        val warnings = mutableListOf<String>()
-        var written = 0
-        for (key in keys) {
-            // The class directories and the compile classpath both come from
-            // `<key>.tasty-roots.txt` and `<key>.tasty-classpath.txt`, which the injected sbt
-            // plugin writes one pair of per project. The classpath is needed because TASTy
-            // leaves the types of most subexpressions implicit, to be reconstructed from the
-            // classpath, so it cannot be read without one.
-            val classDirs =
-                readReportedPath("$key.tasty-roots.txt").filter { Files.isDirectory(it) }.distinct()
-            if (classDirs.isEmpty()) continue
-            // This project's own class directory also appears on its own reported classpath, so
-            // it is reported twice. Dropping the duplicate keeps `ClasspathLoaders.read` -- which
-            // loads every entry eagerly into memory -- from holding the same classes twice, and
-            // keeps the directory from being enumerated as both a project and a dependency.
-            val classpath =
-                (readReportedPath("$key.tasty-classpath.txt").distinct() - classDirs.toSet()) +
-                    jdkClasspath()
-
-            val result =
-                TastyToScip.convert(index.workingDirectory, targetroot(), classDirs, classpath, key)
-            // Accessors on the Scala-defined result are methods, not Kotlin properties.
-            warnings += result.warnings()
-            written += result.shardsWritten()
-            covered += result.coveredSources()
-        }
-        // Warnings, not errors, for the same reason as SemanticDB: the worst a file this cannot
-        // read should cost is its own document, and SemanticDB may well cover it anyway.
-        warnings.take(MAX_REPORTED_WARNINGS).forEach { index.app.warning(it) }
-        val unreported = warnings.size - MAX_REPORTED_WARNINGS
-        if (unreported > 0) {
-            index.app.warning("$unreported more TASTy conversion warning(s) not shown")
-        }
-        if (written > 0) {
-            index.app.info("indexed $written Scala 3 source(s) from TASTy")
-        }
-        return covered
+    private fun convertTasty(key: String, covered: Set<String>): TastyToScip.Result? {
+        // The class directories and the compile classpath both come from `<key>.tasty-roots.txt`
+        // and `<key>.tasty-classpath.txt`, which the injected sbt plugin writes one pair of per
+        // project. The classpath is needed because TASTy leaves the types of most subexpressions
+        // implicit, to be reconstructed from the classpath, so it cannot be read without one.
+        val classDirs =
+            readReportedPath("$key.tasty-roots.txt").filter { Files.isDirectory(it) }.distinct()
+        if (classDirs.isEmpty()) return null
+        // This project's own class directory also appears on its own reported classpath, so it is
+        // reported twice. Dropping the duplicate keeps `ClasspathLoaders.read` -- which loads every
+        // entry eagerly into memory -- from holding the same classes twice, and keeps the directory
+        // from being enumerated as both a project and a dependency.
+        val classpath =
+            (readReportedPath("$key.tasty-classpath.txt").distinct() - classDirs.toSet()) +
+                jdkClasspath()
+        return TastyToScip.convert(
+            index.workingDirectory,
+            targetroot(),
+            classDirs,
+            classpath,
+            key,
+            covered.toSet(),
+        )
     }
+
+    /**
+     * Each project's Scala version and the build's default, from the `<key>.scala-version.txt`
+     * files the injected sbt plugin wrote: the project's version on the first line, the build's on
+     * the second.
+     */
+    private fun readScalaVersions(): Map<String, ScalaVersions> =
+        reportedKeys(".scala-version.txt")
+            .mapNotNull { key ->
+                val lines = readReportedLines("$key.scala-version.txt")
+                if (lines.size >= 2) key to ScalaVersions(lines[0], lines[1]) else null
+            }
+            .toMap()
+
+    private fun semanticdbProjectKeys(): List<String> = reportedKeys(".semanticdb-roots.txt")
 
     /**
      * One key per sbt project that reported TASTy output, matching `ScipSbtPlugin.write`'s
      * `<sanitized-projectId>-<hash(baseDir)>` naming.
      */
-    private fun tastyProjectKeys(): List<String> {
+    private fun tastyProjectKeys(): List<String> = reportedKeys(".tasty-roots.txt")
+
+    /** The keys of every project that wrote a `<key><suffix>` file, in name order. */
+    private fun reportedKeys(suffix: String): List<String> {
         val targetroot = targetroot()
         if (!Files.isDirectory(targetroot)) return emptyList()
         return Files.list(targetroot).use { stream ->
             stream
-                .filter {
-                    Files.isRegularFile(it) && it.fileName.toString().endsWith(".tasty-roots.txt")
-                }
-                .map { it.fileName.toString().removeSuffix(".tasty-roots.txt") }
+                .filter { Files.isRegularFile(it) && it.fileName.toString().endsWith(suffix) }
+                .map { it.fileName.toString().removeSuffix(suffix) }
                 .toList()
+                .sorted()
         }
     }
 
@@ -208,18 +263,6 @@ class SbtBuildTool(index: IndexCommand) : BuildTool("sbt", index) {
         }
     }
 
-    /** Reads the line-separated paths out of every `*<suffix>` file the sbt plugin wrote. */
-    private fun readReportedPaths(suffix: String): List<Path> {
-        val targetroot = targetroot()
-        if (!Files.isDirectory(targetroot)) return emptyList()
-        return Files.list(targetroot).use { stream ->
-            stream
-                .filter { Files.isRegularFile(it) && it.fileName.toString().endsWith(suffix) }
-                .toList()
-                .flatMap(::readPathLines)
-        }
-    }
-
     /** Reads the line-separated paths out of one specific file the sbt plugin wrote. */
     private fun readReportedPath(filename: String): List<Path> {
         val file = targetroot().resolve(filename)
@@ -228,6 +271,17 @@ class SbtBuildTool(index: IndexCommand) : BuildTool("sbt", index) {
 
     private fun readPathLines(file: Path): List<Path> =
         Files.readAllLines(file).filter { it.isNotBlank() }.map { Paths.get(it.trim()) }
+
+    private fun readReportedLines(filename: String): List<String> {
+        val file = targetroot().resolve(filename)
+        return if (Files.isRegularFile(file))
+            Files.readAllLines(file).map { it.trim() }.filter { it.isNotEmpty() }
+        else emptyList()
+    }
+
+    private fun writeLines(filename: String, lines: List<String>) {
+        Files.writeString(targetroot().resolve(filename), lines.joinToString("") { it + "\n" })
+    }
 
     fun targetroot(): Path = index.finalTargetroot(defaultTargetroot)
 
@@ -319,7 +373,70 @@ class SbtBuildTool(index: IndexCommand) : BuildTool("sbt", index) {
         else "sbt"
     }
 
+    /** A project's Scala version, and the build's default it was reported next to. */
+    data class ScalaVersions(val project: String, val build: String)
+
     companion object {
+        /**
+         * Project keys, most preferred first, for deciding which project describes a source several
+         * projects compile.
+         *
+         * Projects on the build's default Scala version come first. The default is `ThisBuild /
+         * scalaVersion` when any project compiles with it; a build that sets the version per
+         * project only -- `ThisBuild` then keeps sbt's own default, which nothing may use -- falls
+         * back to the version most projects use. The remaining projects follow newest Scala version
+         * first, so a cross-built source none of whose projects is on the default is described by
+         * its newest build. Ties go to the key, so the ranking never depends on listing order.
+         */
+        fun rankProjects(versions: Map<String, ScalaVersions>): List<String> {
+            if (versions.isEmpty()) return emptyList()
+            val used = versions.values.map { it.project }
+            val build =
+                versions.values
+                    .map { it.build }
+                    .groupingBy { it }
+                    .eachCount()
+                    .maxByOrNull { it.value }
+                    ?.key
+            val default =
+                build?.takeIf { it in used }
+                    ?: used
+                        .groupingBy { it }
+                        .eachCount()
+                        .entries
+                        .sortedWith(
+                            compareByDescending<Map.Entry<String, Int>> { it.value }
+                                .thenComparator { a, b -> compareVersions(b.key, a.key) }
+                        )
+                        .first()
+                        .key
+            return versions.entries
+                .sortedWith(
+                    compareByDescending<Map.Entry<String, ScalaVersions>> {
+                            it.value.project == default
+                        }
+                        .thenComparator { a, b ->
+                            compareVersions(b.value.project, a.value.project)
+                        }
+                        .thenBy { it.key }
+                )
+                .map { it.key }
+        }
+
+        /** Compares dotted versions numerically, segment by segment: `2.13.16` > `2.9.3`. */
+        internal fun compareVersions(a: String, b: String): Int {
+            val left = a.split('.', '-')
+            val right = b.split('.', '-')
+            for (i in 0 until maxOf(left.size, right.size)) {
+                val l = left.getOrNull(i) ?: return -1
+                val r = right.getOrNull(i) ?: return 1
+                val byNumber = (l.toIntOrNull() ?: -1).compareTo(r.toIntOrNull() ?: -1)
+                val compared = if (byNumber != 0) byNumber else l.compareTo(r)
+                if (compared != 0) return compared
+            }
+            return 0
+        }
+
         /** Enough to see the shape of a problem without burying the build log. */
         private const val MAX_REPORTED_WARNINGS: Int = 10
 

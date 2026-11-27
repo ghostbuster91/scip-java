@@ -15,6 +15,9 @@ public abstract class ScipAggregatorReporter {
 
   public void warning(String message) {}
 
+  /** Progress worth telling the user about, which is neither a warning nor an error. */
+  public void info(String message) {}
+
   public void startProcessing(int taskSize) {}
 
   public void processedOneItem() {}

@@ -48,8 +48,16 @@ public final class SemanticdbToScip {
    * reporting, and they are warnings rather than errors by design: the worst any single one costs
    * is one source file's worth of index. Failing the whole run — and with it the index for every
    * other file — would be the less useful outcome.
+   *
+   * <p>{@code coveredSources} are the source-root-relative paths shards were written for, and
+   * {@code writtenShards} the shards themselves, so a caller converting one project at a time can
+   * skip those sources in later projects and record which project wrote each shard.
    */
-  public record Result(int shardsWritten, List<String> warnings) {}
+  public record Result(
+      int shardsWritten,
+      List<String> warnings,
+      Set<String> coveredSources,
+      List<Path> writtenShards) {}
 
   private static final PathMatcher SEMANTICDB_PATTERN =
       FileSystems.getDefault().getPathMatcher("glob:**.semanticdb");
@@ -76,6 +84,8 @@ public final class SemanticdbToScip {
   private final List<String> unformattableSignatures = new ArrayList<>();
   private final Set<String> unparseableSymbols = new LinkedHashSet<>();
   private int shardsWritten;
+  private final Set<String> coveredSources = new LinkedHashSet<>();
+  private final List<Path> writtenShards = new ArrayList<>();
 
   public SemanticdbToScip(Path sourceroot, Path targetroot) {
     this.sourceroot = sourceroot;
@@ -86,7 +96,8 @@ public final class SemanticdbToScip {
    * Declares source paths that another front-end has already covered, so this one skips them.
    *
    * <p>Used by the TASTy front-end, which runs first for Scala 3 and leaves SemanticDB to fill in
-   * only what it could not read.
+   * only what it could not read, and by a caller converting one project at a time, so that a source
+   * several projects compile is described by the project converted first.
    */
   public SemanticdbToScip skipping(Set<String> coveredSources) {
     this.alreadyCovered = Set.copyOf(coveredSources);
@@ -119,7 +130,11 @@ public final class SemanticdbToScip {
               + unformattableSignatures.get(0)
               + "'");
     }
-    return new Result(shardsWritten, List.copyOf(warnings));
+    return new Result(
+        shardsWritten,
+        List.copyOf(warnings),
+        Set.copyOf(coveredSources),
+        List.copyOf(writtenShards));
   }
 
   private List<Path> findSemanticdbFiles(Path root) {
@@ -178,9 +193,10 @@ public final class SemanticdbToScip {
 
   private void writeShard(ScipTextDocument doc) throws IOException {
     Path absolutePath = Paths.get(URI.create(doc.semanticdb.getUri()));
-    if (alreadyCovered.contains(ScipShardPaths.relativePath(sourceroot, absolutePath))) {
-      // The TASTy front-end already described this source. Writing here would overwrite its
-      // shard, because the shard path is a function of the source path alone.
+    String relativePath = ScipShardPaths.relativePath(sourceroot, absolutePath);
+    if (alreadyCovered.contains(relativePath)) {
+      // Another front-end, or another project, already described this source. Writing here
+      // would overwrite its shard, because the shard path is a function of the source path alone.
       return;
     }
     Optional<Path> shardPath = ScipShardPaths.shardPath(targetroot, sourceroot, absolutePath);
@@ -191,6 +207,8 @@ public final class SemanticdbToScip {
     }
     ScipShardWriter.writeShard(shardPath.get(), buildDocument(doc, absolutePath));
     shardsWritten++;
+    coveredSources.add(relativePath);
+    writtenShards.add(shardPath.get());
   }
 
   private Document buildDocument(ScipTextDocument doc, Path absolutePath) {
